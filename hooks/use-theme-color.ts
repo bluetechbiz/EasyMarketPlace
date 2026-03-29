@@ -3,8 +3,9 @@
  * https://docs.expo.dev/guides/color-schemes/
  */
 
-import { Colors } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+// ✅ Fixed: Changed from @/ to relative paths
+import { Colors } from '../constants/Colors'; // Check if your file is named Colors.ts or theme.ts
+import { useColorScheme } from './use-color-scheme';
 
 export function useThemeColor(
   props: { light?: string; dark?: string },
