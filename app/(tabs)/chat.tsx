@@ -41,7 +41,7 @@ interface ChatScreenParams {
 }
 
 const COLORS = {
-  primary: '#10b981', // MyMarketPlace Emerald
+  primary: '#10b981',
   bg: '#f8fafc',
   white: '#ffffff',
   textDark: '#0f172a',
@@ -49,14 +49,12 @@ const COLORS = {
   error: '#ef4444',
 };
 
-// --- HELPER: TYPE DETECTION ---
 const getMessageType = (content: string): MessageType => {
   const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
   const lowercaseContent = content.toLowerCase();
   return imageExtensions.some(ext => lowercaseContent.includes(ext)) ? 'image' : 'text';
 };
 
-// --- BUBBLE COMPONENT ---
 const MessageBubble = memo(({ item, onRetry }: { item: Message; onRetry: (msg: Message) => void }) => {
   const isError = item.status === 'error';
   const isImage = item.type === 'image';
@@ -113,38 +111,6 @@ export default function ChatScreen() {
   const [isSending, setIsSending] = useState(false);
   const [hasMore, setHasMore] = useState(true);
 
-  // 1. Init Chat
-  useEffect(() => {
-    const initChat = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return router.back();
-      setCurrentUserId(user.id);
-
-      const { data: existing } = await supabase
-        .from('conversations')
-        .select('id')
-        .eq('listing_id', params.itemId)
-        .or(`and(buyer_id.eq.${user.id},seller_id.eq.${params.sellerId}),and(buyer_id.eq.${params.sellerId},seller_id.eq.${user.id})`)
-        .maybeSingle();
-
-      let convId = existing?.id;
-      if (!convId) {
-        const { data: newConv } = await supabase
-          .from('conversations')
-          .insert({ listing_id: params.itemId, buyer_id: user.id, seller_id: params.sellerId })
-          .select('id').single();
-        convId = newConv?.id;
-      }
-
-      if (convId) {
-        setConversationId(convId);
-        fetchMessages(convId, user.id);
-      }
-    };
-    initChat();
-  }, []);
-
-  // 2. Fetch Messages
   const fetchMessages = useCallback(async (convId: string, userId: string, lastDate?: string) => {
     let query = supabase
       .from('messages')
@@ -171,12 +137,53 @@ export default function ChatScreen() {
     setIsLoading(false);
   }, []);
 
-  // 3. Real-time Subscription
+  useEffect(() => {
+    const initChat = async () => {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return router.back();
+        setCurrentUserId(user.id);
+
+        // Standardized Lookup: Checks both roles (Buyer/Seller) for this specific Item
+        const { data: existing } = await supabase
+          .from('conversations')
+          .select('id')
+          .eq('listing_id', params.itemId)
+          .or(`and(buyer_id.eq.${user.id},seller_id.eq.${params.sellerId}),and(buyer_id.eq.${params.sellerId},seller_id.eq.${user.id})`)
+          .maybeSingle();
+
+        let convId = existing?.id;
+        if (!convId) {
+          const { data: newConv, error: createError } = await supabase
+            .from('conversations')
+            .insert({ listing_id: params.itemId, buyer_id: user.id, seller_id: params.sellerId })
+            .select('id').single();
+          
+          if (createError) throw createError;
+          convId = newConv?.id;
+        }
+
+        if (convId) {
+          setConversationId(convId);
+          await fetchMessages(convId, user.id);
+        }
+      } catch (error) {
+        console.error("Chat Init Error:", error);
+        setIsLoading(false);
+      }
+    };
+    initChat();
+  }, [params.itemId, params.sellerId]);
+
   useEffect(() => {
     if (!conversationId) return;
     const channel = supabase.channel(`chat:${conversationId}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${conversationId}` }, 
-      (payload) => {
+      .on('postgres_changes', { 
+        event: 'INSERT', 
+        schema: 'public', 
+        table: 'messages', 
+        filter: `conversation_id=eq.${conversationId}` 
+      }, (payload) => {
         if (payload.new.sender_id !== currentUserId) {
           const newMsg: Message = {
             id: payload.new.id,
@@ -189,10 +196,10 @@ export default function ChatScreen() {
           setMessages(prev => [newMsg, ...prev]);
         }
       }).subscribe();
+
     return () => { supabase.removeChannel(channel); };
   }, [conversationId, currentUserId]);
 
-  // 4. Send Logic
   const sendMessage = useCallback(async (content?: string, isImage = false) => {
     const textToSend = content || inputText.trim();
     if (!textToSend || !conversationId || !currentUserId) return;
@@ -269,7 +276,6 @@ export default function ChatScreen() {
           </View>
         </View>
         
-        {/* Product Context Card */}
         <TouchableOpacity 
           style={styles.productCard} 
           onPress={() => router.push({ pathname: '/details', params: { id: params.itemId } })}
