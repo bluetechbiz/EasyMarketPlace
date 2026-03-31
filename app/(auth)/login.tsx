@@ -2,22 +2,22 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    Image,
-    Keyboard,
-    KeyboardAvoidingView,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    TouchableWithoutFeedback,
-    View,
+  ActivityIndicator,
+  Alert,
+  Image,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { supabase } from '../../src/lib/supabase'; // ✅ Ensure this path is correct
+import { supabase } from '../../src/lib/supabase'; // ✅ Path verified
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -43,7 +43,6 @@ export default function LoginScreen() {
     setIsLoading(true);
 
     try {
-      // ✅ REAL SUPABASE AUTHENTICATION
       const { data, error } = await supabase.auth.signInWithPassword({
         email: cleanEmail,
         password: cleanPassword,
@@ -52,7 +51,6 @@ export default function LoginScreen() {
       if (error) throw error;
 
       if (data.user) {
-        // AppContext's onAuthStateChange handles the state update automatically
         router.replace('/(tabs)/profile');
       }
     } catch (error: any) {
@@ -68,6 +66,30 @@ export default function LoginScreen() {
       setIsLoading(false);
     }
   }, [email, password, isLoading, router]);
+
+  // ✅ FORGOT PASSWORD LOGIC (Fixed: No UI-blocking loading state)
+  const handleForgotPassword = async () => {
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
+      Alert.alert('Email Required', 'Please enter your email address to reset your password.');
+      return;
+    }
+
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+        redirectTo: 'mymarketplace://reset-password',
+      });
+
+      if (error) throw error;
+
+      Alert.alert(
+        'Email Sent',
+        'Check your inbox for a password reset link.'
+      );
+    } catch (error: any) {
+      Alert.alert('Error', error.message);
+    }
+  };
 
   const isFormValid = email.trim() && password.trim();
 
@@ -138,6 +160,13 @@ export default function LoginScreen() {
                 </TouchableOpacity>
               </View>
 
+              <TouchableOpacity 
+                onPress={handleForgotPassword}
+                style={styles.forgotPasswordContainer}
+              >
+                <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
+              </TouchableOpacity>
+
               <TouchableOpacity
                 style={[
                   styles.loginButton,
@@ -170,7 +199,6 @@ export default function LoginScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#ffffff' },
-  centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   scrollContent: { paddingHorizontal: 24, paddingTop: 60, paddingBottom: 40 },
   header: { alignItems: 'center', marginBottom: 40 },
   logoWrapper: { width: 160, height: 160, justifyContent: 'center', alignItems: 'center', marginBottom: 10 },
@@ -185,13 +213,23 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
     borderRadius: 16,
     paddingHorizontal: 16,
-    marginBottom: 20,
+    marginBottom: 12,
     borderWidth: 1,
     borderColor: '#e2e8f0',
     height: 60,
   },
   inputIcon: { marginRight: 12 },
   input: { flex: 1, fontSize: 16, color: '#1e293b' },
+  forgotPasswordContainer: {
+    alignSelf: 'flex-end',
+    marginBottom: 24,
+    marginRight: 4,
+  },
+  forgotPasswordText: {
+    color: '#10b981', // ✅ Premium Emerald Green
+    fontSize: 14,
+    fontWeight: '700',
+  },
   loginButton: {
     backgroundColor: '#1e293b',
     height: 60,
