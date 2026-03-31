@@ -1,5 +1,5 @@
-import { nanoid } from 'nanoid/non-secure';
 import { createContext, ReactNode, useContext, useEffect, useState } from 'react';
+import { Alert } from 'react-native';
 import { supabase } from '../lib/supabase';
 
 type User = { id: string; email?: string; user_metadata?: { display_name?: string } } | null;
@@ -10,8 +10,8 @@ export type Item = {
   price: number;
   location: string;
   category?: string;
-  imageUri?: string | null;   // Primary thumbnail
-  imageUris: string[];        // Full array for carousel
+  imageUri?: string | null;
+  imageUris: string[];
   userId?: string;
   createdAt?: string; 
   status?: 'active' | 'sold';
@@ -21,13 +21,13 @@ type AppContextType = {
   listings: Item[];
   loading: boolean;
   refreshListings: () => Promise<void>;
-  addListing: (newItem: Omit<Item, 'id' | 'createdAt' | 'status' | 'imageUri' | 'imageUris'>, files: any[]) => Promise<void>;
-  deleteListing: (id: string) => Promise<void>;
+  addListing: (newItem: any, imageUri: string) => Promise<void>;
+  deleteListing: (id: string, imageUri?: string | null) => Promise<void>;
   currentUser: User;
   logout: () => Promise<void>;
   favorites: Item[];
-  addFavorite: (item: Item) => Promise<void>; // Changed to Promise
-  removeFavorite: (id: string) => Promise<void>; // Changed to Promise
+  addFavorite: (item: Item) => Promise<void>;
+  removeFavorite: (id: string) => Promise<void>;
 };
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -47,7 +47,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       location: item.location,
       category: item.category,
       imageUris: uris,
-      imageUri: uris.length > 0 ? uris[0] : null,
+      imageUri: item.image_uri || (uris.length > 0 ? uris[0] : null),
       userId: item.user_id,
       createdAt: item.created_at,
       status: item.status,
@@ -59,10 +59,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const { data: { session } } = await supabase.auth.getSession();
       const user = session?.user ?? null;
       setCurrentUser(user);
-      
       await fetchLiveListings();
-      if (user) await fetchFavorites(user.id); // Load favorites on start
-      
+      if (user) await fetchFavorites(user.id);
       setLoading(false);
     };
 
@@ -80,7 +78,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => authListener.subscription.unsubscribe();
   }, []);
 
-  // --- REAL-TIME SYNC ---
   useEffect(() => {
     const subscription = supabase
       .channel('global_listings_sync')
@@ -105,31 +102,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       )
       .subscribe();
-
     return () => { supabase.removeChannel(subscription); };
   }, []);
 
   const fetchLiveListings = async () => {
-    const { data } = await supabase
-      .from('listings')
-      .select('*')
-      .order('created_at', { ascending: false });
-
+    const { data } = await supabase.from('listings').select('*').order('created_at', { ascending: false });
     if (data) setListings(data.map(mapItem));
   };
 
-  // --- NEW: FETCH FAVORITES FROM DB ---
   const fetchFavorites = async (userId: string) => {
-    const { data, error } = await supabase
-      .from('favorites')
-      .select('*, listings(*)') // Join with listings table
-      .eq('user_id', userId);
-
+    const { data, error } = await supabase.from('favorites').select('*, listings(*)').eq('user_id', userId);
     if (data && !error) {
-      // Extract the nested listing data and map it
-      const favListings = data
-        .filter((f: any) => f.listings !== null)
-        .map((f: any) => mapItem(f.listings));
+      const favListings = data.filter((f: any) => f.listings !== null).map((f: any) => mapItem(f.listings));
       setFavorites(favListings);
     }
   };
@@ -140,44 +124,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setFavorites([]);
   };
 
-  const uploadImages = async (files: any[]): Promise<string[]> => {
-    const uploadedUrls: string[] = [];
-    for (const file of files) {
-      try {
-        const ext = file.uri.split('.').pop() || 'jpg';
-        const filename = `${nanoid()}.${ext}`;
-        const response = await fetch(file.uri);
-        const blob = await response.blob();
-
-        const { data, error } = await supabase.storage
-          .from('listings')
-          .upload(filename, blob, { contentType: `image/${ext}`, upsert: true });
-
-        if (error) throw error;
-        
-        const { data: publicData } = supabase.storage.from('listings').getPublicUrl(data.path);
-        uploadedUrls.push(publicData.publicUrl);
-      } catch (err) {
-        console.error("Upload error:", err);
-      }
-    }
-    return uploadedUrls;
-  };
-
-  const addListing = async (newItem: Omit<Item, 'id' | 'createdAt' | 'status' | 'imageUri' | 'imageUris'>, files: any[]) => {
+  const addListing = async (newItem: any, publicImageUrl: string) => {
     if (!currentUser) return;
     try {
-      let uris: string[] = [];
-      if (files.length > 0) uris = await uploadImages(files);
-
       const { error } = await supabase.from('listings').insert([{
         ...newItem,
         user_id: currentUser.id,
-        image_uris: uris,
-        image_uri: uris.length > 0 ? uris[0] : null,
+        image_uri: publicImageUrl,
         status: 'active'
       }]);
-
       if (error) throw error;
     } catch (err: any) {
       console.error("Failed to add listing:", err.message);
@@ -185,61 +140,62 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const deleteListing = async (id: string) => {
-    await supabase.from('listings').delete().eq('id', id);
+  // ✅ IMPROVED DELETE LOGIC
+  const deleteListing = async (id: string, imageUri?: string | null) => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        Alert.alert("Error", "You must be logged in to delete.");
+        return;
+      }
+
+      // 1. Storage Cleanup
+      if (imageUri && imageUri.includes('LISTING-IMAGES')) {
+        const filePath = imageUri.split('LISTING-IMAGES/')[1];
+        if (filePath) {
+          await supabase.storage.from('LISTING-IMAGES').remove([filePath]);
+        }
+      }
+
+      // 2. Database Delete
+      const { error, count } = await supabase
+        .from('listings')
+        .delete({ count: 'exact' })
+        .eq('id', id)
+        .eq('user_id', session.user.id); // Extra safety check
+
+      if (error) throw error;
+      
+      if (count === 0) {
+        throw new Error("No listing found or you don't have permission.");
+      }
+
+      // Success! Real-time sync handles the UI removal.
+    } catch (err: any) {
+      console.error("Delete failed details:", err);
+      Alert.alert("Delete Failed", err.message || "Ensure you are the owner of this post.");
+    }
   };
 
-  // --- UPDATED: PERSISTENT FAVORITES ---
   const addFavorite = async (item: Item) => {
     if (!currentUser) return;
-    
-    // Update Local UI instantly
     setFavorites(prev => [...prev, item]);
-
-    const { error } = await supabase
-      .from('favorites')
-      .insert([{ user_id: currentUser.id, listing_id: item.id }]);
-
+    const { error } = await supabase.from('favorites').insert([{ user_id: currentUser.id, listing_id: item.id }]);
     if (error) {
-      console.error("Error adding favorite:", error.message);
-      // Rollback UI if DB fails
       setFavorites(prev => prev.filter(f => f.id !== item.id));
+      Alert.alert("Error", "Could not save to favorites.");
     }
   };
 
   const removeFavorite = async (id: string) => {
     if (!currentUser) return;
-
-    // Update Local UI instantly
     setFavorites(prev => prev.filter(f => f.id !== id));
-
-    const { error } = await supabase
-      .from('favorites')
-      .delete()
-      .eq('user_id', currentUser.id)
-      .eq('listing_id', id);
-
-    if (error) {
-      console.error("Error removing favorite:", error.message);
-      // Optional: Logic to re-add to UI if delete fails
-    }
+    const { error } = await supabase.from('favorites').delete().eq('user_id', currentUser.id).eq('listing_id', id);
+    if (error) Alert.alert("Error", "Could not remove favorite.");
   };
 
   return (
-    <AppContext.Provider
-      value={{
-        listings,
-        loading,
-        refreshListings: fetchLiveListings,
-        addListing,
-        deleteListing,
-        currentUser,
-        logout,
-        favorites,
-        addFavorite,
-        removeFavorite,
-      }}
-    >
+    <AppContext.Provider value={{ listings, loading, refreshListings: fetchLiveListings, addListing, deleteListing, currentUser, logout, favorites, addFavorite, removeFavorite }}>
       {children}
     </AppContext.Provider>
   );

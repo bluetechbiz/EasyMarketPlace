@@ -34,6 +34,7 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
     const [category, setCategory] = useState('');
     const [dbCategories, setDbCategories] = useState<{ name: string }[]>([]);
 
+    // 1. Fetch Categories
     useEffect(() => {
         const loadCategories = async () => {
             const { data } = await supabase.from('categories').select('name').order('name');
@@ -45,20 +46,20 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
         if (visible) loadCategories();
     }, [visible]);
 
+    // 2. Pick and Process Image (Forced 16:9 and JPEG)
     const pickImage = async () => {
         const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ['images'],
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
             allowsEditing: true,
-            aspect: [16, 9], // Required per preference
+            aspect: [16, 9], 
             quality: 1, 
         });
 
         if (!result.canceled && result.assets?.[0]) {
             try {
-                // Resize to 1024px width for memory efficiency
                 const manipulated = await ImageManipulator.manipulateAsync(
                     result.assets[0].uri,
-                    [{ resize: { width: 1024 } }],
+                    [{ resize: { width: 1200 } }],
                     { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true }
                 );
                 setImage(manipulated.uri);
@@ -69,21 +70,24 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
         }
     };
 
-    const uploadToStorage = async (uri: string) => {
+    // 3. Secure Upload to LISTING-IMAGES Bucket
+    const uploadToStorage = async () => {
         if (!base64Data) throw new Error("Image data missing.");
-        const ext = uri.split('.').pop()?.toLowerCase() || 'jpg';
-        const fileName = `${Date.now()}.${ext}`;
-        const contentType = `image/${ext === 'png' ? 'png' : 'jpeg'}`;
+
+        const fileName = `${Date.now()}.jpg`; // Force .jpg extension
+        const contentType = 'image/jpeg';
 
         const { error } = await supabase.storage
-            .from('listing-images')
+            .from('LISTING-IMAGES')
             .upload(fileName, decode(base64Data), { contentType, upsert: true });
 
         if (error) throw error;
-        const { data: urlData } = supabase.storage.from('listing-images').getPublicUrl(fileName);
+        
+        const { data: urlData } = supabase.storage.from('LISTING-IMAGES').getPublicUrl(fileName);
         return urlData.publicUrl;
     };
 
+    // 4. Handle Final Post with Mapping Fix
     const handlePost = useCallback(async () => {
         const numericPrice = parseFloat(price);
         if (!title.trim() || !image) {
@@ -95,28 +99,30 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
             return;
         }
 
-        setIsLoading(true); // Triggers the overlay
+        setIsLoading(true);
 
         try {
             const { data: { user } } = await supabase.auth.getUser();
             if (!user) throw new Error("Session expired.");
 
-            const publicImageUrl = await uploadToStorage(image);
+            const publicImageUrl = await uploadToStorage();
 
+            // Insert using exact Database Column Names
             const { error: dbError } = await supabase
                 .from('listings')
                 .insert([{
                     title: title.trim(),
                     price: numericPrice,
                     description: description.trim(),
-                    image_uri: publicImageUrl,
+                    image_uri: publicImageUrl, 
                     category,
-                    location: 'Milan, IT',
-                    user_id: user.id,
+                    location: 'Milan, IT', // Default location
+                    user_id: user.id,         
                 }]);
 
             if (dbError) throw dbError;
 
+            // Clear state and close
             setTitle(''); setPrice(''); setDescription(''); setImage(null); setBase64Data(null);
             onClose();
             Alert.alert("Success", "Listing is live!");
@@ -130,11 +136,10 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
     return (
         <Modal visible={visible} animationType="slide" presentationStyle="pageSheet">
             <View style={styles.container}>
-                {/* Full-Screen Loading Overlay */}
                 {isLoading && (
                     <View style={styles.loadingOverlay}>
                         <View style={styles.loadingBox}>
-                            <ActivityIndicator size="large" color="#22c55e" />
+                            <ActivityIndicator size="large" color="#10b981" />
                             <Text style={styles.loadingText}>Publishing Listing...</Text>
                         </View>
                     </View>
@@ -145,7 +150,11 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
                         <Text style={styles.cancelText}>Cancel</Text>
                     </TouchableOpacity>
                     <Text style={styles.headerTitle}>New Listing</Text>
-                    <TouchableOpacity onPress={handlePost} disabled={isLoading || !image} style={[styles.postBtn, (isLoading || !image) && {opacity: 0.5}]}>
+                    <TouchableOpacity 
+                        onPress={handlePost} 
+                        disabled={isLoading || !image} 
+                        style={[styles.postBtn, (isLoading || !image) && {opacity: 0.5}]}
+                    >
                         <Text style={styles.postBtnText}>Post</Text>
                     </TouchableOpacity>
                 </View>
@@ -155,7 +164,7 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
                         <TouchableOpacity style={styles.imagePlaceholder} onPress={pickImage} disabled={isLoading}>
                             {image ? <Image source={{ uri: image }} style={styles.previewImage} /> : (
                                 <View style={styles.uploadPrompt}>
-                                    <Ionicons name="camera" size={32} color="#22c55e" />
+                                    <Ionicons name="camera" size={32} color="#10b981" />
                                     <Text style={styles.uploadText}>Add Photo (16:9)</Text>
                                 </View>
                             )}
@@ -164,7 +173,6 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
                         <View style={styles.form}>
                             <Text style={styles.label}>Title</Text>
                             <TextInput style={styles.input} placeholder="Item name" value={title} onChangeText={setTitle} />
-                            
                             <Text style={styles.label}>Price (€)</Text>
                             <TextInput style={styles.input} placeholder="0.00" value={price} onChangeText={setPrice} keyboardType="decimal-pad" />
                             
@@ -182,7 +190,13 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
                             </ScrollView>
 
                             <Text style={styles.label}>Description</Text>
-                            <TextInput style={[styles.input, styles.textArea]} placeholder="Details..." value={description} onChangeText={setDescription} multiline />
+                            <TextInput 
+                                style={[styles.input, styles.textArea]} 
+                                placeholder="Details..." 
+                                value={description} 
+                                onChangeText={setDescription} 
+                                multiline 
+                            />
                         </View>
                     </ScrollView>
                 </KeyboardAvoidingView>
@@ -193,42 +207,26 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
 
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: 'white' },
-    loadingOverlay: {
-        ...StyleSheet.absoluteFillObject,
-        backgroundColor: 'rgba(0,0,0,0.6)',
-        zIndex: 999,
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    loadingBox: {
-        backgroundColor: 'white',
-        padding: 30,
-        borderRadius: 16,
-        alignItems: 'center',
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.1,
-        shadowRadius: 10,
-        elevation: 5,
-    },
+    loadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 999, justifyContent: 'center', alignItems: 'center' },
+    loadingBox: { backgroundColor: 'white', padding: 30, borderRadius: 16, alignItems: 'center' },
     loadingText: { marginTop: 15, fontWeight: '700', color: '#1e293b' },
     header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
     headerTitle: { fontSize: 18, fontWeight: '800' },
     cancelText: { color: '#64748b', fontSize: 16 },
-    postBtn: { backgroundColor: '#22c55e', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20 },
+    postBtn: { backgroundColor: '#10b981', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20 },
     postBtnText: { color: 'white', fontWeight: '800' },
     scrollContent: { padding: 20 },
     imagePlaceholder: { width: '100%', aspectRatio: 16 / 9, backgroundColor: '#f8fafc', borderRadius: 12, borderStyle: 'dashed', borderWidth: 2, borderColor: '#cbd5e1', justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
     previewImage: { width: '100%', height: '100%' },
     uploadPrompt: { alignItems: 'center' },
-    uploadText: { marginTop: 8, fontWeight: '600' },
+    uploadText: { marginTop: 8, fontWeight: '600', color: '#64748b' },
     form: { marginTop: 20 },
     label: { fontSize: 14, fontWeight: '700', color: '#475569', marginBottom: 8 },
     input: { backgroundColor: '#f8fafc', borderRadius: 12, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: '#e2e8f0' },
     textArea: { height: 100, textAlignVertical: 'top' },
     catScroll: { marginBottom: 20 },
     catChip: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20, backgroundColor: '#f1f5f9', marginRight: 10, borderWidth: 1, borderColor: '#e2e8f0' },
-    catChipActive: { backgroundColor: '#22c55e', borderColor: '#22c55e' },
+    catChipActive: { backgroundColor: '#10b981', borderColor: '#10b981' },
     catChipText: { color: '#64748b', fontWeight: '600' },
     catChipTextActive: { color: 'white' }
 });
