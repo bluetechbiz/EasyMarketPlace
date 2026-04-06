@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "776542684037",
+    "project_id": "mymarketplace-4c682",
+    "storage_bucket": "mymarketplace-4c682.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:776542684037:android:7ace948015a38bbf1a7aec",
+        "android_client_info": {
+          "package_name": "com.sajer.mymarketplace"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBjfMrPtNpk8Cqjk6iO5Tr-stvMoEEzSAs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

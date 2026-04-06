@@ -1,6 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
 import { decode } from 'base64-arraybuffer';
-// Use the legacy import path for SDK 54 compatibility
 import * as FileSystem from 'expo-file-system/legacy';
 import { Image } from 'expo-image';
 import * as ImageManipulator from 'expo-image-manipulator';
@@ -25,22 +24,25 @@ import { useAppContext } from '../../src/context/AppContext';
 import { supabase } from '../../src/lib/supabase';
 
 const DEFAULT_AVATAR = 'https://i.pravatar.cc/150?img=68';
+const ADMIN_EMAILS = ['sajero351@gmail.com']; 
+
 const COLORS = {
-  primary: '#10b981', // Your MyMarketPlace Emerald
+  primary: '#10b981', 
   white: '#ffffff',
   grayLight: '#f8fafc',
   grayText: '#64748b',
   red: '#ef4444',
   blue: '#3b82f6',
   dark: '#0f172a',
+  purple: '#8b5cf6',
 };
 
-interface MenuButtonProps {
-  icon: keyof typeof Ionicons.glyphMap;
-  color: string;
-  label: string;
-  onPress: () => void;
-  isLast?: boolean;
+interface Order {
+  id: string;
+  amount: number;
+  created_at: string;
+  status: string;
+  listings: { title: string; image_uri: string } | null;
 }
 
 export default function ProfileScreen() {
@@ -52,6 +54,18 @@ export default function ProfileScreen() {
   const [displayName, setDisplayName] = useState('User');
   const [isEditingName, setIsEditingName] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [sales, setSales] = useState<Order[]>([]);
+  const [activeTab, setActiveTab] = useState<'buying' | 'selling'>('buying');
+  const [loadingActivity, setLoadingActivity] = useState(false);
+
+  // Robust Admin Check
+  const isAdmin = useMemo(() => {
+    const email = currentUser?.email || currentUser?.user_metadata?.email;
+    if (!email) return false;
+    return ADMIN_EMAILS.includes(email.toLowerCase().trim());
+  }, [currentUser]);
 
   const myListings = useMemo(
     () => listings.filter((item) => item.userId === currentUser?.id),
@@ -73,12 +87,32 @@ export default function ProfileScreen() {
       
       if (profile) {
         setDisplayName(profile.full_name || 'User');
-        setAvatarUri(profile.avatar_url ? `${profile.avatar_url}?t=${Date.now()}` : null);
+        if (profile.avatar_url) {
+          setAvatarUri(`${profile.avatar_url}?t=${Date.now()}`);
+        }
       }
+
+      setLoadingActivity(true);
+      const { data: purchaseData } = await supabase
+        .from('orders')
+        .select('*, listings(title, image_uri)')
+        .eq('buyer_id', user.id)
+        .order('created_at', { ascending: false });
+
+      const { data: salesData } = await supabase
+        .from('orders')
+        .select('*, listings(title, image_uri)')
+        .eq('seller_id', user.id)
+        .order('created_at', { ascending: false });
+
+      setOrders(purchaseData || []);
+      setSales(salesData || []);
     } catch (err: any) {
       console.error('Load Profile Error:', err.message);
+    } finally {
+      setLoadingActivity(false);
     }
-  }, []);
+  }, [currentUser]);
 
   useEffect(() => {
     loadProfileData();
@@ -95,16 +129,11 @@ export default function ProfileScreen() {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
-
-      const { error } = await supabase
-        .from('profiles')
-        .update({ full_name: displayName.trim() })
-        .eq('id', user.id);
-
+      const { error } = await supabase.from('profiles').update({ full_name: displayName.trim() }).eq('id', user.id);
       if (error) throw error;
       setIsEditingName(false);
       Alert.alert('Success', 'Profile updated');
-    } catch (err: any) {
+    } catch (err) {
       Alert.alert('Error', 'Could not save name');
     }
   };
@@ -113,108 +142,53 @@ export default function ProfileScreen() {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') return Alert.alert('Error', 'Gallery access required');
-
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images, 
-        allowsEditing: true,
-        aspect: [1, 1],
-        quality: 1, 
+        mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [1, 1], quality: 1, 
       });
-
       if (result.canceled || !result.assets?.[0]) return;
 
       setIsLoadingAvatar(true);
-      const assetUri = result.assets[0].uri;
-
       const manipResult = await ImageManipulator.manipulateAsync(
-        assetUri,
-        [{ resize: { width: 400, height: 400 } }],
+        result.assets[0].uri, [{ resize: { width: 400, height: 400 } }],
         { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG }
       );
 
-      const fileName = `avatar-${currentUser?.id || Date.now()}-${Date.now()}.jpg`;
-
-      if (avatarUri && !avatarUri.includes('pravatar.cc')) {
-        try {
-          const oldPath = avatarUri.split('/').pop()?.split('?')[0];
-          if (oldPath) {
-            await supabase.storage.from('AVATARS').remove([oldPath]);
-          }
-        } catch (e) {
-          console.log("Cleanup skipped");
-        }
-      }
-
-      const base64 = await FileSystem.readAsStringAsync(manipResult.uri, {
-        encoding: 'base64', 
+      const fileName = `avatar-${currentUser?.id}-${Date.now()}.jpg`;
+      const base64 = await FileSystem.readAsStringAsync(manipResult.uri, { encoding: 'base64' });
+      const { error: uploadError } = await supabase.storage.from('AVATARS').upload(fileName, decode(base64), { 
+        upsert: true, contentType: 'image/jpeg' 
       });
 
-      const arrayBuffer = decode(base64);
-
-      const { error: uploadError } = await supabase.storage
-        .from('AVATARS') 
-        .upload(fileName, arrayBuffer, { 
-          upsert: true, 
-          contentType: 'image/jpeg' 
-        });
-
       if (uploadError) throw uploadError;
-
       const { data: urlData } = supabase.storage.from('AVATARS').getPublicUrl(fileName);
-      
-      const { error: dbError } = await supabase
-        .from('profiles')
-        .update({ avatar_url: urlData.publicUrl })
-        .eq('id', currentUser?.id);
-
-      if (dbError) throw dbError;
+      await supabase.from('profiles').update({ avatar_url: urlData.publicUrl }).eq('id', currentUser?.id);
 
       setAvatarUri(`${urlData.publicUrl}?t=${Date.now()}`);
-      Alert.alert('Success', 'Profile picture updated!');
     } catch (err: any) {
-      console.error('Upload Error Details:', err);
-      Alert.alert('Upload Failed', `Error: ${err.message || 'Unknown error'}`);
+      Alert.alert('Upload Failed', err.message);
     } finally {
       setIsLoadingAvatar(false);
     }
   };
 
   const handleSignOut = () => {
-    Alert.alert(
-      'Sign Out',
-      'Are you sure you want to log out?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { 
-          text: 'Sign Out', 
-          style: 'destructive', 
-          onPress: async () => {
-            try {
-              await logout?.();
-              router.replace('/(auth)/login');
-            } catch (err) {
-              Alert.alert('Error', 'Could not sign out properly.');
-            }
-          } 
-        },
-      ]
-    );
+    Alert.alert('Sign Out', 'Log out?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Sign Out', style: 'destructive', onPress: async () => {
+        await logout?.();
+        router.replace('/(auth)/login');
+      }},
+    ]);
   };
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
-        <ScrollView 
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />}
-        >
+        <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />}>
+          
           <View style={styles.header}>
-            {/* BRANDING BADGE */}
             <View style={styles.brandBadge}>
-               <Image 
-                source={require('../../assets/icon_v1.png')}
-                style={styles.brandIcon}
-                contentFit="contain"
-              />
+              <Image source={require('../../assets/icon_v1.png')} style={styles.brandIcon} contentFit="contain" />
               <Text style={styles.brandText}>MYMARKETPLACE</Text>
             </View>
 
@@ -224,12 +198,7 @@ export default function ProfileScreen() {
                   <View style={[styles.avatar, styles.loaderContainer]}><ActivityIndicator color={COLORS.primary} /></View>
                 ) : (
                   <>
-                    <Image 
-                        source={{ uri: avatarUri || DEFAULT_AVATAR }} 
-                        style={styles.avatar} 
-                        cachePolicy="none" 
-                        transition={200} 
-                    />
+                    <Image source={{ uri: avatarUri || DEFAULT_AVATAR }} style={styles.avatar} contentFit="cover" cachePolicy="none" />
                     <View style={styles.cameraOverlay}><Ionicons name="camera" size={16} color={COLORS.white} /></View>
                   </>
                 )}
@@ -238,14 +207,7 @@ export default function ProfileScreen() {
 
             {isEditingName ? (
               <View style={styles.nameEditContainer}>
-                <TextInput
-                  style={styles.nameInput}
-                  value={displayName}
-                  onChangeText={setDisplayName}
-                  autoFocus
-                  onSubmitEditing={saveName}
-                  placeholderTextColor="rgba(255,255,255,0.6)"
-                />
+                <TextInput style={styles.nameInput} value={displayName} onChangeText={setDisplayName} autoFocus onSubmitEditing={saveName} />
                 <TouchableOpacity onPress={saveName}><Ionicons name="checkmark-circle" size={28} color={COLORS.white} /></TouchableOpacity>
               </View>
             ) : (
@@ -260,25 +222,60 @@ export default function ProfileScreen() {
             <View style={styles.statCard}><Text style={styles.statValue}>{myListings.length}</Text><Text style={styles.statLabel}>Ads</Text></View>
             <View style={styles.statDivider} />
             <View style={styles.statCard}><Text style={styles.statValue}>{favorites.length}</Text><Text style={styles.statLabel}>Saved</Text></View>
+            <View style={styles.statDivider} />
+            <View style={styles.statCard}><Text style={styles.statValue}>{orders.length + sales.length}</Text><Text style={styles.statLabel}>Deals</Text></View>
+          </View>
+
+          <View style={styles.activityWrapper}>
+            <Text style={styles.menuSectionTitle}>ACTIVITY HUB</Text>
+            <View style={styles.tabContainer}>
+              <TouchableOpacity style={[styles.tab, activeTab === 'buying' && styles.activeTab]} onPress={() => setActiveTab('buying')}>
+                <Text style={[styles.tabText, activeTab === 'buying' && styles.activeTabText]}>Purchases</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.tab, activeTab === 'selling' && styles.activeTab]} onPress={() => setActiveTab('selling')}>
+                <Text style={[styles.tabText, activeTab === 'selling' && styles.activeTabText]}>Sales</Text>
+              </TouchableOpacity>
+            </View>
+
+            {loadingActivity ? (
+              <ActivityIndicator color={COLORS.primary} style={{ marginTop: 20 }} />
+            ) : (
+              <View style={styles.orderList}>
+                {(activeTab === 'buying' ? orders : sales).slice(0, 5).map((item) => (
+                  <View key={item.id} style={styles.orderItem}>
+                    <View style={styles.orderIconBox}>
+                      <Ionicons name={activeTab === 'buying' ? "basket" : "cash"} size={20} color={COLORS.primary} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.orderTitle} numberOfLines={1}>{item.listings?.title || 'Order'}</Text>
+                      <Text style={styles.orderDate}>{new Date(item.created_at).toLocaleDateString()}</Text>
+                    </View>
+                    <Text style={styles.orderAmount}>€{item.amount.toFixed(2)}</Text>
+                  </View>
+                ))}
+                {(activeTab === 'buying' ? orders : sales).length === 0 && (
+                  <Text style={styles.emptyText}>No activity found yet.</Text>
+                )}
+              </View>
+            )}
           </View>
 
           <View style={styles.menuWrapper}>
-            <Text style={styles.menuSectionTitle}>ACCOUNT DASHBOARD</Text>
+            <Text style={styles.menuSectionTitle}>ACCOUNT SETTINGS</Text>
             <View style={styles.menuCard}>
-              <MenuButton 
-                icon="chatbubbles-outline" 
-                color={COLORS.blue} 
-                label="Messages" 
-                onPress={() => router.push('/(tabs)/chat')} 
-              />
-              <MenuButton 
-                icon="heart-outline" 
-                color={COLORS.red} 
-                label="Your Favorites" 
-                onPress={() => router.push('/favorites')} 
-                isLast 
-              />
+              <MenuButton icon="chatbubbles-outline" color={COLORS.blue} label="Messages" onPress={() => router.push('/(tabs)/chat')} />
+              <MenuButton icon="heart-outline" color={COLORS.red} label="Your Favorites" onPress={() => router.push('/favorites')} isLast />
             </View>
+
+            {isAdmin && (
+              <View style={{ marginTop: 24 }}>
+                <Text style={[styles.menuSectionTitle, { color: COLORS.purple }]}>ADMIN TOOLS</Text>
+                <View style={[styles.menuCard, { borderColor: COLORS.purple, borderWidth: 0.5 }]}>
+                  <MenuButton icon="cloud-download-outline" color={COLORS.purple} label="AliExpress Importer" onPress={() => router.push('/admin/import')} />
+                  <MenuButton icon="cube-outline" color="#64748b" label="Fulfillment Center" onPress={() => router.push('/admin/orders')} isLast />
+                </View>
+              </View>
+            )}
           </View>
 
           <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut}>
@@ -290,7 +287,7 @@ export default function ProfileScreen() {
   );
 }
 
-const MenuButton = ({ icon, color, label, onPress, isLast }: MenuButtonProps) => (
+const MenuButton = ({ icon, color, label, onPress, isLast }: any) => (
   <TouchableOpacity style={[styles.menuItem, isLast && { borderBottomWidth: 0 }]} onPress={onPress}>
     <View style={[styles.iconBox, { backgroundColor: `${color}15` }]}><Ionicons name={icon} size={20} color={color} /></View>
     <Text style={styles.menuText}>{label}</Text>
@@ -317,12 +314,25 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 20, fontWeight: 'bold', color: COLORS.dark },
   statLabel: { fontSize: 12, color: COLORS.grayText },
   statDivider: { width: 1, height: '50%', backgroundColor: '#f1f5f9', alignSelf: 'center' },
+  activityWrapper: { marginTop: 24, paddingHorizontal: 20 },
+  tabContainer: { flexDirection: 'row', backgroundColor: '#e2e8f0', borderRadius: 12, padding: 4, marginBottom: 12 },
+  tab: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 10 },
+  activeTab: { backgroundColor: COLORS.white, elevation: 2 },
+  tabText: { fontWeight: '700', color: COLORS.grayText, fontSize: 13 },
+  activeTabText: { color: COLORS.primary },
+  orderList: { backgroundColor: COLORS.white, borderRadius: 20, padding: 12 },
+  orderItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
+  orderIconBox: { width: 36, height: 36, borderRadius: 10, backgroundColor: '#ecfdf5', justifyContent: 'center', alignItems: 'center', marginRight: 12 },
+  orderTitle: { fontWeight: '700', color: COLORS.dark, fontSize: 14 },
+  orderDate: { fontSize: 11, color: COLORS.grayText },
+  orderAmount: { fontWeight: '800', color: COLORS.dark },
+  emptyText: { textAlign: 'center', padding: 20, color: COLORS.grayText, fontStyle: 'italic' },
   menuWrapper: { marginTop: 24, paddingHorizontal: 20 },
   menuSectionTitle: { fontSize: 11, fontWeight: '800', color: '#94a3b8', marginBottom: 10, marginLeft: 4, letterSpacing: 0.5 },
   menuCard: { backgroundColor: COLORS.white, borderRadius: 20, overflow: 'hidden' },
   menuItem: { flexDirection: 'row', alignItems: 'center', padding: 15, borderBottomWidth: 1, borderBottomColor: COLORS.grayLight },
   iconBox: { width: 40, height: 40, borderRadius: 10, justifyContent: 'center', alignItems: 'center', marginRight: 15 },
   menuText: { flex: 1, fontSize: 15, fontWeight: '600', color: '#334155' },
-  signOutButton: { marginHorizontal: 20, marginTop: 24, padding: 16, borderRadius: 16, alignItems: 'center', backgroundColor: '#fee2e2' },
+  signOutButton: { marginHorizontal: 20, marginTop: 24, padding: 16, borderRadius: 16, alignItems: 'center', backgroundColor: '#fee2e2', marginBottom: 40 },
   signOutText: { color: COLORS.red, fontWeight: 'bold', fontSize: 16 },
 });

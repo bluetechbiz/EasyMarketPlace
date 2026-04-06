@@ -16,6 +16,7 @@ import {
     useWindowDimensions
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import PaymentButton from '../../src/lib/PaymentButton';
 import { supabase } from '../../src/lib/supabase';
 import PostModal from '../post';
 
@@ -25,9 +26,12 @@ interface Item {
     title: string;
     price: number;
     location: string;
-    category_id?: string; // Upgrade: Using ID for logic
+    category?: string; // ✅ Match your DB column name
     image_uri?: string | null;
+    image_uris?: any | null; 
     created_at: string;
+    seller_id: string; 
+    user_id: string;   
 }
 
 interface Category {
@@ -36,42 +40,70 @@ interface Category {
 }
 
 const PAGE_SIZE = 12;
+const FALLBACK_IMAGE = 'https://images.unsplash.com/photo-1584824486509-112e4181ff6b?q=80&w=500';
 
-// --- LISTING CARD (MEMOIZED & RECYCLABLE) ---
 const ListingCard = React.memo(({ item, width, imageHeight, onPress }: { 
     item: Item, 
     width: number, 
     imageHeight: number, 
-    onPress: (id: string) => void 
+    onPress: (id: string) => void
 }) => {
     const [imgError, setImgError] = useState(false);
     
-    // Memoized source: No object recreation unless error or URI changes
-    const source = useMemo(() => (
-        (imgError || !item.image_uri)
-            ? { uri: 'https://images.unsplash.com/photo-1584824486509-112e4181ff6b?q=80&w=500' }
-            : { uri: item.image_uri }
-    ), [imgError, item.image_uri]);
+    const source = useMemo(() => {
+        if (imgError) return { uri: FALLBACK_IMAGE };
+        let rawUri: string | null = null;
+        if (item.image_uris && Array.isArray(item.image_uris) && item.image_uris.length > 0) {
+            rawUri = item.image_uris[0];
+        } else if (item.image_uri && typeof item.image_uri === 'string') {
+            rawUri = item.image_uri;
+        } else if (typeof item.image_uris === 'string' && item.image_uris.startsWith('[')) {
+            try {
+                const parsed = JSON.parse(item.image_uris);
+                rawUri = Array.isArray(parsed) ? parsed[0] : parsed;
+            } catch {
+                rawUri = item.image_uris;
+            }
+        }
+        if (!rawUri || typeof rawUri !== 'string') return { uri: FALLBACK_IMAGE };
+        let cleanUrl = rawUri.trim();
+        if (cleanUrl.startsWith('//')) {
+            cleanUrl = `https:${cleanUrl}`;
+        } else if (!cleanUrl.startsWith('http') && !cleanUrl.startsWith('file')) {
+            cleanUrl = `https://${cleanUrl}`;
+        }
+        return { uri: cleanUrl };
+    }, [imgError, item.image_uri, item.image_uris]);
 
     const cardStyle = useMemo(() => [styles.card, { width }], [width]);
     const imgStyle = useMemo(() => [styles.img, { height: imageHeight }], [imageHeight]);
 
     return (
-        <TouchableOpacity activeOpacity={0.8} style={cardStyle} onPress={() => onPress(item.id)}>
-            <Image 
-                source={source} 
-                recyclingKey={item.id} // Advanced: Reuses image slots in FlashList
-                style={imgStyle} 
-                contentFit="cover" 
-                transition={200}
-                onError={() => setImgError(true)}
-                placeholder={{ blurhash: 'LKN]~^%2_3?7%M_Ps;Rj4n%9%Mof' }} 
-            />
-            <View style={styles.info}>
-                <Text style={styles.title} numberOfLines={1}>{item.title}</Text>
-                <Text style={styles.price}>€{Number(item.price).toFixed(2)}</Text>
+        <View style={cardStyle}>
+            <TouchableOpacity activeOpacity={0.8} onPress={() => onPress(item.id)}>
+                <Image 
+                    source={source} 
+                    recyclingKey={item.id}
+                    style={imgStyle} 
+                    contentFit="cover" 
+                    transition={200}
+                    onError={() => setImgError(true)}
+                    placeholder={{ blurhash: 'LKN]~^%2_3?7%M_Ps;Rj4n%9%Mof' }} 
+                />
+                <View style={styles.info}>
+                    <Text style={styles.title} numberOfLines={1}>{item.title}</Text>
+                    <Text style={styles.price}>€{Number(item.price).toFixed(2)}</Text>
+                </View>
+            </TouchableOpacity>
+            
+            <View style={styles.cardButtonContainer}>
+                <PaymentButton 
+                    displayPrice={item.price} 
+                    listingId={item.id}
+                    listingTitle={item.title}
+                />
             </View>
-        </TouchableOpacity>
+        </View>
     );
 });
 
@@ -79,15 +111,13 @@ export default function HomeScreen() {
     const router = useRouter();
     const { width: windowWidth } = useWindowDimensions();
     
-    // REFS
     const isMounted = useRef(true);
     const isFetchingRef = useRef(false);
-    const activeCategoryIdRef = useRef('All'); // Logic-based ref
+    const activeCategoryIdRef = useRef('All');
     const searchRef = useRef('');
     const listRef = useRef<FlashList<Item>>(null);
     const hasMoreRef = useRef(true);
 
-    // STATE
     const [realListings, setRealListings] = useState<Item[]>([]);
     const [categories, setCategories] = useState<Category[]>([]);
     const [isInitialLoading, setIsInitialLoading] = useState(true);
@@ -106,11 +136,9 @@ export default function HomeScreen() {
         return () => { isMounted.current = false; };
     }, []);
 
-    // Filter Sync & Auto-scroll to top
     useEffect(() => {
         activeCategoryIdRef.current = activeCategoryId;
         searchRef.current = debouncedSearch.trim().toLowerCase();
-        listRef.current?.scrollToOffset({ offset: 0, animated: true });
     }, [activeCategoryId, debouncedSearch]);
 
     useEffect(() => {
@@ -118,7 +146,6 @@ export default function HomeScreen() {
         return () => clearTimeout(timer);
     }, [searchText]);
 
-    // CATEGORY FETCH
     useEffect(() => {
         const fetchCategories = async () => {
             const { data, error } = await supabase.from('categories').select('*').order('name');
@@ -127,39 +154,32 @@ export default function HomeScreen() {
         fetchCategories();
     }, []);
 
-    // FETCH DATA
     const fetchData = useCallback(async (cursor?: string, isRefresh = false) => {
         if (isFetchingRef.current) return;
         isFetchingRef.current = true;
-        
         if (isRefresh) {
             setIsRefreshing(true);
             hasMoreRef.current = true;
         } else if (cursor) {
             setIsLoadingMore(true);
         }
-
         try {
             let query = supabase
                 .from('listings')
                 .select('*')
                 .order('created_at', { ascending: false })
                 .limit(PAGE_SIZE);
-
             if (cursor) query = query.lt('created_at', cursor);
-            if (activeCategoryIdRef.current !== 'All') query = query.eq('category_id', activeCategoryIdRef.current);
+            
+            // ✅ FIX: Using 'category' column to match your database schema
+            if (activeCategoryIdRef.current !== 'All') {
+                query = query.eq('category', activeCategoryIdRef.current);
+            }
+            
             if (searchRef.current.length >= 2) query = query.ilike('title', `%${searchRef.current}%`);
-
             const { data, error } = await query;
             if (error) throw error;
-
             if (isMounted.current && data) {
-                // Prefetch assets for the next interaction
-                if (data.length > 0) {
-                    const urls = data.map(i => i.image_uri).filter(Boolean) as string[];
-                    Image.prefetch(urls);
-                }
-
                 setRealListings(prev => {
                     const combined = isRefresh || !cursor ? data : [...prev, ...data];
                     return Array.from(new Map(combined.map(item => [item.id, item])).values()) as Item[];
@@ -167,7 +187,8 @@ export default function HomeScreen() {
                 hasMoreRef.current = data.length === PAGE_SIZE;
             }
         } catch (err: any) {
-            if (isMounted.current) Alert.alert("Error", "Check your connection and try again.");
+            console.error("Fetch Error:", err);
+            if (isMounted.current) Alert.alert("Error", "Check your connection.");
         } finally {
             isFetchingRef.current = false;
             setIsInitialLoading(false);
@@ -180,15 +201,14 @@ export default function HomeScreen() {
         fetchData(undefined, true);
     }, [activeCategoryId, debouncedSearch, fetchData]);
 
-    // REAL-TIME (Optimistic ready)
     useEffect(() => {
         const subscription = supabase
             .channel('marketplace_realtime')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'listings' }, (payload) => {
                 const item = payload.new as Item;
-                const matchesCat = activeCategoryIdRef.current === 'All' || item.category_id === activeCategoryIdRef.current;
+                // ✅ FIX: Matching logic updated to 'category'
+                const matchesCat = activeCategoryIdRef.current === 'All' || item.category === activeCategoryIdRef.current;
                 const matchesSearch = searchRef.current.length < 2 || item.title?.toLowerCase().includes(searchRef.current);
-                
                 if (payload.eventType === 'INSERT' && matchesCat && matchesSearch) {
                     setRealListings(current => [item, ...current.filter(i => i.id !== item.id)]);
                 } else if (payload.eventType === 'UPDATE') {
@@ -202,7 +222,6 @@ export default function HomeScreen() {
                 }
             })
             .subscribe();
-
         return () => { supabase.removeChannel(subscription); };
     }, []);
 
@@ -211,7 +230,12 @@ export default function HomeScreen() {
     }, [router]);
 
     const renderItem = useCallback(({ item }: { item: Item }) => (
-        <ListingCard item={item} width={cardWidth} imageHeight={imageHeight} onPress={handlePress} />
+        <ListingCard 
+            item={item} 
+            width={cardWidth} 
+            imageHeight={imageHeight} 
+            onPress={handlePress} 
+        />
     ), [cardWidth, imageHeight, handlePress]);
 
     return (
@@ -220,9 +244,9 @@ export default function HomeScreen() {
                 ref={listRef}
                 data={realListings}
                 numColumns={2}
-                estimatedItemSize={250}
+                estimatedItemSize={350} 
                 drawDistance={windowWidth}
-                windowSize={5} // Fix #4: Strict memory management for long-scroll lists
+                windowSize={5}
                 keyExtractor={(item) => item.id?.toString()}
                 contentContainerStyle={styles.gridContainer}
                 onEndReached={() => {
@@ -254,10 +278,10 @@ export default function HomeScreen() {
                             {categories.map(cat => (
                                 <TouchableOpacity 
                                     key={cat.id} 
-                                    onPress={() => setActiveCategoryId(cat.id)} // Logic-based filter
-                                    style={[styles.catChip, activeCategoryId === cat.id && styles.catChipActive]}
+                                    onPress={() => setActiveCategoryId(cat.name)} // ✅ Use cat.name for exact text matching
+                                    style={[styles.catChip, activeCategoryId === cat.name && styles.catChipActive]}
                                 >
-                                    <Text style={[styles.catText, activeCategoryId === cat.id && styles.catTextActive]}>{cat.name}</Text>
+                                    <Text style={[styles.catText, activeCategoryId === cat.name && styles.catTextActive]}>{cat.name}</Text>
                                 </TouchableOpacity>
                             ))}
                         </ScrollView>
@@ -303,11 +327,24 @@ const styles = StyleSheet.create({
     catText: { color: '#64748b', fontWeight: '700', fontSize: 14 },
     catTextActive: { color: 'white' },
     gridContainer: { paddingHorizontal: 16, paddingBottom: 100 },
-    card: { backgroundColor: 'white', borderRadius: 16, marginBottom: 16, overflow: 'hidden', elevation: 2, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 10 },
-    img: { width: '100%' },
-    info: { padding: 12 },
+    card: { 
+        backgroundColor: 'white', 
+        borderRadius: 16, 
+        marginBottom: 16, 
+        overflow: 'hidden', 
+        elevation: 2, 
+        shadowColor: '#000', 
+        shadowOpacity: 0.05, 
+        shadowRadius: 10 
+    },
+    img: { width: '100%', backgroundColor: '#f1f5f9' },
+    info: { padding: 12, paddingBottom: 8 },
     title: { fontWeight: '700', fontSize: 14, color: '#1e293b' },
     price: { color: '#10b981', fontWeight: '800', marginTop: 4, fontSize: 15 },
+    cardButtonContainer: {
+        padding: 10,
+        paddingTop: 0,
+    },
     fab: { position: 'absolute', bottom: 30, right: 20, backgroundColor: '#0f172a', width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 5 },
     emptyBox: { alignItems: 'center', marginTop: 80 },
     emptyText: { marginTop: 10, color: '#94a3b8', fontSize: 16, fontWeight: '500' }

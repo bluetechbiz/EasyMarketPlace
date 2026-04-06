@@ -1,10 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Dimensions,
   FlatList,
   Image,
   KeyboardAvoidingView,
@@ -18,7 +20,8 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../src/lib/supabase';
 
-// --- TYPES ---
+const { width } = Dimensions.get('window');
+
 type MessageStatus = 'sending' | 'sent' | 'error';
 type MessageType = 'text' | 'image';
 
@@ -51,13 +54,12 @@ const COLORS = {
 
 const getMessageType = (content: string): MessageType => {
   const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
-  const lowercaseContent = content.toLowerCase();
-  return imageExtensions.some(ext => lowercaseContent.includes(ext)) ? 'image' : 'text';
+  return imageExtensions.some(ext => content.toLowerCase().includes(ext)) ? 'image' : 'text';
 };
 
-const MessageBubble = memo(({ item, onRetry }: { item: Message; onRetry: (msg: Message) => void }) => {
-  const isError = item.status === 'error';
+const MessageBubble = memo(({ item }: { item: Message }) => {
   const isImage = item.type === 'image';
+  const isError = item.status === 'error';
 
   return (
     <View style={[styles.bubbleWrapper, item.isMe ? styles.alignEnd : styles.alignStart]}>
@@ -67,13 +69,12 @@ const MessageBubble = memo(({ item, onRetry }: { item: Message; onRetry: (msg: M
         isImage && styles.imageBubble,
       ]}>
         {isImage ? (
-          <Image source={{ uri: item.text }} style={styles.chatImage} />
+          <Image source={{ uri: item.text }} style={styles.chatImage} resizeMode="cover" />
         ) : (
           <Text style={[styles.messageText, { color: item.isMe ? '#fff' : COLORS.textDark }]}>
             {item.text}
           </Text>
         )}
-
         <View style={[styles.statusContainer, isImage && styles.imageStatusOverlay]}>
           <Text style={[styles.timeText, { color: item.isMe || isImage ? '#fff' : COLORS.textGray }]}>
             {new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -82,17 +83,12 @@ const MessageBubble = memo(({ item, onRetry }: { item: Message; onRetry: (msg: M
             <Ionicons
               name={item.status === 'sending' ? 'time-outline' : isError ? 'alert-circle' : 'checkmark-done'}
               size={14}
-              color={isError ? COLORS.error : (isImage ? '#fff' : 'rgba(255,255,255,0.8)')}
+              color={isError ? COLORS.error : '#fff'}
               style={styles.tickIcon}
             />
           )}
         </View>
       </View>
-      {isError && (
-        <TouchableOpacity onPress={() => onRetry(item)} style={styles.retryButton}>
-          <Text style={styles.retryText}>Failed. Tap to retry</Text>
-        </TouchableOpacity>
-      )}
     </View>
   );
 });
@@ -108,67 +104,77 @@ export default function ChatScreen() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [isSending, setIsSending] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
+  const [isSendingImage, setIsSendingImage] = useState(false);
 
-  const fetchMessages = useCallback(async (convId: string, userId: string, lastDate?: string) => {
-    let query = supabase
-      .from('messages')
-      .select('*')
-      .eq('conversation_id', convId)
-      .order('created_at', { ascending: false })
-      .limit(20);
+  const fetchMessages = useCallback(async (convId: string, userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', convId)
+        .order('created_at', { ascending: false })
+        .limit(50);
 
-    if (lastDate) query = query.lt('created_at', lastDate);
-
-    const { data, error } = await query;
-    if (!error && data) {
-      if (data.length < 20) setHasMore(false);
-      const formatted: Message[] = data.map(m => ({
-        id: m.id,
-        text: m.content,
-        isMe: m.sender_id === userId,
-        status: 'sent',
-        created_at: m.created_at,
-        type: getMessageType(m.content),
-      }));
-      setMessages(prev => lastDate ? [...prev, ...formatted] : formatted);
+      if (error) throw error;
+      if (data) {
+        setMessages(data.map(m => ({
+          id: m.id,
+          text: m.content,
+          isMe: m.sender_id === userId,
+          status: 'sent',
+          created_at: m.created_at,
+          type: getMessageType(m.content),
+        })));
+      }
+    } catch (err) {
+      console.error("Fetch error:", err);
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   }, []);
 
   useEffect(() => {
     const initChat = async () => {
+      // Check if we have the necessary IDs
+      if (!params.itemId || !params.sellerId) {
+        console.log("DEBUG: Missing params, cannot connect");
+        setIsLoading(false);
+        return;
+      }
+
       try {
         const { data: { user } } = await supabase.auth.getUser();
         if (!user) return router.back();
         setCurrentUserId(user.id);
-
-        // Standardized Lookup: Checks both roles (Buyer/Seller) for this specific Item
+        
+        // Find or create conversation
         const { data: existing } = await supabase
           .from('conversations')
-          .select('id')
-          .eq('listing_id', params.itemId)
-          .or(`and(buyer_id.eq.${user.id},seller_id.eq.${params.sellerId}),and(buyer_id.eq.${params.sellerId},seller_id.eq.${user.id})`)
-          .maybeSingle();
+          .select('id, buyer_id, seller_id')
+          .eq('listing_id', params.itemId);
 
-        let convId = existing?.id;
+        let conv = existing?.find(
+          c =>
+            (c.buyer_id === user.id && c.seller_id === params.sellerId) ||
+            (c.buyer_id === params.sellerId && c.seller_id === user.id)
+        );
+
+        let convId = conv?.id;
+
         if (!convId) {
           const { data: newConv, error: createError } = await supabase
             .from('conversations')
             .insert({ listing_id: params.itemId, buyer_id: user.id, seller_id: params.sellerId })
             .select('id').single();
-          
-          if (createError) throw createError;
-          convId = newConv?.id;
+          if (createError) throw new Error(createError.message);
+          convId = newConv.id;
         }
 
-        if (convId) {
-          setConversationId(convId);
-          await fetchMessages(convId, user.id);
-        }
-      } catch (error) {
-        console.error("Chat Init Error:", error);
+        console.log("DEBUG: Connected to Conversation ID:", convId);
+        setConversationId(convId);
+        await fetchMessages(convId, user.id);
+      } catch (err: any) {
+        Alert.alert("Connection Error", err.message);
         setIsLoading(false);
       }
     };
@@ -176,86 +182,106 @@ export default function ChatScreen() {
   }, [params.itemId, params.sellerId]);
 
   useEffect(() => {
-    if (!conversationId) return;
-    const channel = supabase.channel(`chat:${conversationId}`)
-      .on('postgres_changes', { 
-        event: 'INSERT', 
-        schema: 'public', 
-        table: 'messages', 
-        filter: `conversation_id=eq.${conversationId}` 
-      }, (payload) => {
-        if (payload.new.sender_id !== currentUserId) {
-          const newMsg: Message = {
-            id: payload.new.id,
-            text: payload.new.content,
-            isMe: false,
-            status: 'sent',
-            created_at: payload.new.created_at,
-            type: getMessageType(payload.new.content),
-          };
-          setMessages(prev => [newMsg, ...prev]);
-        }
-      }).subscribe();
+    if (!conversationId || !currentUserId) return;
 
-    return () => { supabase.removeChannel(channel); };
+    const channel = supabase
+      .channel(`chat-${conversationId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `conversation_id=eq.${conversationId}`,
+        },
+        (payload) => {
+          const newMsg = payload.new;
+          setMessages((prev) => {
+            if (prev.some(m => m.id === newMsg.id)) return prev;
+
+            const duplicateIndex = prev.findIndex(m => 
+              m.status === 'sending' && m.text === newMsg.content
+            );
+
+            if (duplicateIndex !== -1) {
+              const updated = [...prev];
+              updated[duplicateIndex] = {
+                id: newMsg.id,
+                text: newMsg.content,
+                isMe: newMsg.sender_id === currentUserId,
+                status: 'sent',
+                created_at: newMsg.created_at,
+                type: getMessageType(newMsg.content),
+              };
+              return updated;
+            }
+
+            return [{
+              id: newMsg.id,
+              text: newMsg.content,
+              isMe: newMsg.sender_id === currentUserId,
+              status: 'sent',
+              created_at: newMsg.created_at,
+              type: getMessageType(newMsg.content),
+            }, ...prev];
+          });
+        }
+      )
+      .subscribe((status) => {
+        console.log("DEBUG: Subscription status:", status);
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [conversationId, currentUserId]);
 
-  const sendMessage = useCallback(async (content?: string, isImage = false) => {
-    const textToSend = content || inputText.trim();
-    if (!textToSend || !conversationId || !currentUserId) return;
+  const sendMessage = async (content?: string, isImage = false) => {
+    const text = content || inputText.trim();
+    if (!text || !conversationId || !currentUserId) return;
 
     if (!isImage) setInputText('');
-    const tempId = Date.now().toString();
-    const optimistic: Message = {
+
+    const tempId = `temp-${Date.now()}`;
+    setMessages(prev => [{
       id: tempId,
-      text: textToSend,
+      text: text,
       isMe: true,
       status: 'sending',
       created_at: new Date().toISOString(),
       type: isImage ? 'image' : 'text',
-    };
+    }, ...prev]);
 
-    setMessages(prev => [optimistic, ...prev]);
-
-    const { data, error } = await supabase.from('messages').insert({
+    const { error } = await supabase.from('messages').insert({
       conversation_id: conversationId,
       sender_id: currentUserId,
-      content: textToSend,
-    }).select().single();
+      content: text,
+    });
 
     if (error) {
       setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'error' } : m));
-    } else {
-      setMessages(prev => prev.map(m => m.id === tempId ? { ...m, id: data.id, status: 'sent' } : m));
     }
-  }, [inputText, conversationId, currentUserId]);
+  };
 
   const handlePickImage = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({ 
-      mediaTypes: ImagePicker.MediaTypeOptions.Images, 
-      quality: 0.5 
-    });
-
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.6 });
     if (!result.canceled && result.assets[0]) {
-      setIsSending(true);
+      setIsSendingImage(true);
       try {
-        const uri = result.assets[0].uri;
-        const response = await fetch(uri);
+        const manip = await ImageManipulator.manipulateAsync(result.assets[0].uri, [{ resize: { width: 800 } }], { compress: 0.7 });
+        const response = await fetch(manip.uri);
         const blob = await response.blob();
-        const path = `${currentUserId}/${Date.now()}.jpg`;
+        const path = `chat/${currentUserId}_${Date.now()}.jpg`;
 
-        const { error: uploadError } = await supabase.storage
-          .from('chat-attachments')
-          .upload(path, blob, { contentType: 'image/jpeg', upsert: true });
+        const { error: uploadError } = await supabase.storage.from('chat-attachments').upload(path, blob);
+        if (uploadError) throw uploadError;
 
-        if (!uploadError) {
-          const { data: urlData } = supabase.storage.from('chat-attachments').getPublicUrl(path);
-          await sendMessage(urlData.publicUrl, true);
-        }
-      } catch (err) {
-        Alert.alert('Error', 'Could not upload image');
+        const { data } = supabase.storage.from('chat-attachments').getPublicUrl(path);
+        await sendMessage(data.publicUrl, true);
+      } catch (e: any) {
+        Alert.alert("Upload Failed", e.message);
       } finally {
-        setIsSending(false);
+        setIsSendingImage(false);
       }
     }
   };
@@ -269,24 +295,19 @@ export default function ChatScreen() {
           </TouchableOpacity>
           <View style={styles.headerInfo}>
             <Text style={styles.headerTitle}>{params.sellerName || 'Chat'}</Text>
-            <View style={styles.statusRow}>
-              <View style={styles.onlineDot} />
-              <Text style={styles.onlineStatus}>Active Now</Text>
-            </View>
+            <Text style={styles.onlineStatus}>Active</Text>
           </View>
         </View>
-        
-        <TouchableOpacity 
-          style={styles.productCard} 
-          onPress={() => router.push({ pathname: '/details', params: { id: params.itemId } })}
-        >
-          <Image source={{ uri: params.productImage }} style={styles.productImage} />
-          <View style={styles.productDetails}>
-            <Text style={styles.productName} numberOfLines={1}>{params.productName}</Text>
-            <Text style={styles.productPrice}>{params.price}</Text>
+
+        {params.productImage && (
+          <View style={styles.itemHeader}>
+            <Image source={{ uri: params.productImage }} style={styles.itemThumb} />
+            <View style={styles.itemInfo}>
+              <Text style={styles.itemName} numberOfLines={1}>{params.productName}</Text>
+              <Text style={styles.itemPrice}>{params.price}</Text>
+            </View>
           </View>
-          <Ionicons name="chevron-forward" size={16} color={COLORS.textGray} />
-        </TouchableOpacity>
+        )}
       </SafeAreaView>
 
       {isLoading ? (
@@ -296,43 +317,27 @@ export default function ChatScreen() {
           ref={flatListRef}
           data={messages}
           inverted
-          keyExtractor={item => item.id}
-          onEndReached={() => {
-            if (!hasMore || messages.length === 0) return;
-            fetchMessages(conversationId!, currentUserId!, messages[messages.length - 1]?.created_at);
-          }}
-          renderItem={({ item }) => (
-            <MessageBubble 
-              item={item} 
-              onRetry={() => sendMessage(item.text, item.type === 'image')} 
-            />
-          )}
+          renderItem={({ item }) => <MessageBubble item={item} />}
           contentContainerStyle={styles.messagesList}
+          keyExtractor={(item) => item.id}
         />
       )}
 
-      <KeyboardAvoidingView 
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined} 
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
-      >
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={90}>
         <View style={[styles.inputContainer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
-          <TouchableOpacity onPress={handlePickImage} style={styles.attachButton} disabled={isSending}>
-            {isSending ? <ActivityIndicator size="small" color={COLORS.primary} /> : <Ionicons name="add-circle" size={32} color={COLORS.primary} />}
+          <TouchableOpacity onPress={handlePickImage} style={styles.attachBtn} disabled={isSendingImage}>
+            {isSendingImage ? <ActivityIndicator size="small" color={COLORS.primary} /> : <Ionicons name="add-circle" size={32} color={COLORS.primary} />}
           </TouchableOpacity>
           <View style={styles.inputWrapper}>
             <TextInput 
               style={styles.input} 
               value={inputText} 
               onChangeText={setInputText} 
-              placeholder="Type a message..." 
+              placeholder="Message..." 
               multiline 
             />
-            <TouchableOpacity 
-              onPress={() => sendMessage()} 
-              disabled={!inputText.trim() || isSending} 
-              style={[styles.sendButton, { backgroundColor: inputText.trim() ? COLORS.primary : '#f1f5f9' }]}
-            >
-              <Ionicons name="arrow-up" size={24} color={inputText.trim() ? 'white' : '#cbd5e1'} />
+            <TouchableOpacity onPress={() => sendMessage()} style={styles.sendBtn}>
+              <Ionicons name="arrow-up-circle" size={32} color={inputText.trim() ? COLORS.primary : COLORS.textGray} />
             </TouchableOpacity>
           </View>
         </View>
@@ -343,39 +348,35 @@ export default function ChatScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
-  safeHeader: { backgroundColor: COLORS.white, borderBottomWidth: 1, borderBottomColor: '#f1f5f9', elevation: 2, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 5 },
+  safeHeader: { backgroundColor: COLORS.white, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
   header: { flexDirection: 'row', alignItems: 'center', padding: 12 },
   backBtn: { padding: 4 },
   headerInfo: { marginLeft: 8 },
   headerTitle: { fontSize: 18, fontWeight: '700', color: COLORS.textDark },
-  statusRow: { flexDirection: 'row', alignItems: 'center' },
-  onlineDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.primary, marginRight: 5 },
-  onlineStatus: { fontSize: 12, color: COLORS.textGray },
-  productCard: { flexDirection: 'row', alignItems: 'center', padding: 10, marginHorizontal: 16, marginBottom: 12, backgroundColor: '#f8fafc', borderRadius: 12, borderWidth: 1, borderColor: '#e2e8f0' },
-  productImage: { width: 40, height: 40, borderRadius: 8, backgroundColor: '#e2e8f0' },
-  productDetails: { marginLeft: 12, flex: 1 },
-  productName: { fontSize: 14, fontWeight: '600', color: COLORS.textDark },
-  productPrice: { fontSize: 13, color: COLORS.primary, fontWeight: '700' },
-  messagesList: { paddingHorizontal: 16, paddingVertical: 20 },
+  onlineStatus: { fontSize: 12, color: COLORS.primary },
+  itemHeader: { flexDirection: 'row', padding: 10, backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#f1f5f9', alignItems: 'center' },
+  itemThumb: { width: 45, height: 45, borderRadius: 8, marginRight: 12 },
+  itemInfo: { flex: 1 },
+  itemName: { fontSize: 14, fontWeight: '600', color: COLORS.textDark },
+  itemPrice: { fontSize: 13, color: COLORS.primary, fontWeight: '700' },
+  messagesList: { padding: 16 },
   bubbleWrapper: { marginVertical: 6 },
   alignEnd: { alignItems: 'flex-end' },
   alignStart: { alignItems: 'flex-start' },
   messageBubble: { maxWidth: '82%', padding: 12, borderRadius: 20 },
   myMessage: { backgroundColor: COLORS.primary, borderBottomRightRadius: 4 },
-  theirMessage: { backgroundColor: COLORS.white, borderBottomLeftRadius: 4, shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 3, elevation: 1 },
+  theirMessage: { backgroundColor: COLORS.white, borderBottomLeftRadius: 4 },
   messageText: { fontSize: 16, lineHeight: 22 },
   imageBubble: { padding: 0, overflow: 'hidden', borderRadius: 16 },
-  chatImage: { width: 240, height: 180, borderRadius: 16 },
+  chatImage: { width: width * 0.65, height: 200 },
   statusContainer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', marginTop: 4 },
-  timeText: { fontSize: 10, opacity: 0.7 },
-  tickIcon: { marginLeft: 3 },
-  inputContainer: { backgroundColor: COLORS.white, paddingHorizontal: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#f1f5f9', flexDirection: 'row', alignItems: 'flex-end' },
-  inputWrapper: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: '#f1f5f9', borderRadius: 24, paddingLeft: 12, paddingRight: 6, paddingVertical: 6 },
-  input: { flex: 1, maxHeight: 100, fontSize: 16, paddingVertical: 8, color: COLORS.textDark },
-  attachButton: { marginRight: 8, marginBottom: 6 },
-  sendButton: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  timeText: { fontSize: 10 },
+  tickIcon: { marginLeft: 4 },
+  inputContainer: { flexDirection: 'row', padding: 12, backgroundColor: COLORS.white, alignItems: 'flex-end', borderTopWidth: 1, borderTopColor: '#f1f5f9' },
+  attachBtn: { marginRight: 8, marginBottom: 4 },
+  inputWrapper: { flex: 1, flexDirection: 'row', backgroundColor: '#f1f5f9', borderRadius: 24, paddingHorizontal: 12, alignItems: 'center' },
+  input: { flex: 1, minHeight: 40, maxHeight: 100, fontSize: 16, paddingVertical: 8 },
+  sendBtn: { marginLeft: 4, marginBottom: 4 },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  retryButton: { marginTop: 4 },
-  retryText: { color: COLORS.error, fontSize: 11, fontWeight: '700' },
-  imageStatusOverlay: { position: 'absolute', bottom: 8, right: 8, backgroundColor: 'rgba(0,0,0,0.4)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }
+  imageStatusOverlay: { position: 'absolute', bottom: 5, right: 8, backgroundColor: 'rgba(0,0,0,0.4)', padding: 2, borderRadius: 4 }
 });

@@ -6,8 +6,10 @@ import { useCallback, useEffect, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    Dimensions,
     Image,
     KeyboardAvoidingView,
+    LayoutAnimation,
     Modal,
     Platform,
     ScrollView,
@@ -15,9 +17,20 @@ import {
     Text,
     TextInput,
     TouchableOpacity,
+    UIManager,
     View,
 } from 'react-native';
 import { supabase } from '../src/lib/supabase';
+
+if (
+    Platform.OS === 'android' && 
+    UIManager.setLayoutAnimationEnabledExperimental && 
+    !(global as any).nativeFabricUIManager
+) {
+    UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+const { width } = Dimensions.get('window');
 
 interface PostModalProps {
     visible: boolean;
@@ -26,15 +39,16 @@ interface PostModalProps {
 
 export default function PostModal({ visible, onClose }: PostModalProps) {
     const [isLoading, setIsLoading] = useState(false);
+    const [uploadingIndexes, setUploadingIndexes] = useState<number[]>([]);
     const [title, setTitle] = useState('');
     const [price, setPrice] = useState('');
     const [description, setDescription] = useState('');
-    const [image, setImage] = useState<string | null>(null);
-    const [base64Data, setBase64Data] = useState<string | null>(null);
+    const [location, setLocation] = useState(''); 
+    const [images, setImages] = useState<string[]>([]); 
+    const [base64Array, setBase64Array] = useState<string[]>([]); 
     const [category, setCategory] = useState('');
     const [dbCategories, setDbCategories] = useState<{ name: string }[]>([]);
 
-    // 1. Fetch Categories
     useEffect(() => {
         const loadCategories = async () => {
             const { data } = await supabase.from('categories').select('name').order('name');
@@ -46,8 +60,17 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
         if (visible) loadCategories();
     }, [visible]);
 
-    // 2. Pick and Process Image (Forced 16:9 and JPEG)
+    const resetForm = () => {
+        setTitle(''); setPrice(''); setDescription(''); setLocation(''); setImages([]); setBase64Array([]);
+    };
+
     const pickImage = async () => {
+        // Note: Check if you want to increase this limit to 10 in the UI as well
+        if (images.length >= 3) {
+            Alert.alert("Limit Reached", "Max 3 photos allowed.");
+            return;
+        }
+
         const result = await ImagePicker.launchImageLibraryAsync({
             mediaTypes: ImagePicker.MediaTypeOptions.Images,
             allowsEditing: true,
@@ -59,79 +82,87 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
             try {
                 const manipulated = await ImageManipulator.manipulateAsync(
                     result.assets[0].uri,
-                    [{ resize: { width: 1200 } }],
+                    [{ resize: { width: 1200 } }], 
                     { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true }
                 );
-                setImage(manipulated.uri);
-                setBase64Data(manipulated.base64 || null);
+                
+                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                setImages(prev => [...prev, manipulated.uri]);
+                if (manipulated.base64) {
+                    setBase64Array(prev => [...prev, manipulated.base64]);
+                }
             } catch (e) {
                 Alert.alert("Error", "Failed to process image.");
             }
         }
     };
 
-    // 3. Secure Upload to LISTING-IMAGES Bucket
-    const uploadToStorage = async () => {
-        if (!base64Data) throw new Error("Image data missing.");
-
-        const fileName = `${Date.now()}.jpg`; // Force .jpg extension
-        const contentType = 'image/jpeg';
-
-        const { error } = await supabase.storage
-            .from('LISTING-IMAGES')
-            .upload(fileName, decode(base64Data), { contentType, upsert: true });
-
-        if (error) throw error;
-        
-        const { data: urlData } = supabase.storage.from('LISTING-IMAGES').getPublicUrl(fileName);
-        return urlData.publicUrl;
+    const removeImage = (index: number) => {
+        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+        setImages(images.filter((_, i) => i !== index));
+        setBase64Array(base64Array.filter((_, i) => i !== index));
     };
 
-    // 4. Handle Final Post with Mapping Fix
+    const uploadAllImages = async () => {
+        const promises = base64Array.map(async (base64, index) => {
+            setUploadingIndexes(prev => [...prev, index]);
+            const fileName = `listing_${Date.now()}_${index}.jpg`;
+            
+            // ✅ Updated to lowercase 'listing-images'
+            const { error } = await supabase.storage
+                .from('listing-images')
+                .upload(fileName, decode(base64), { contentType: 'image/jpeg', upsert: true });
+
+            if (error) {
+                setUploadingIndexes(prev => prev.filter(i => i !== index));
+                throw error;
+            }
+
+            // ✅ Updated to lowercase 'listing-images'
+            const { data: urlData } = supabase.storage.from('listing-images').getPublicUrl(fileName);
+            setUploadingIndexes(prev => prev.filter(i => i !== index));
+            return urlData.publicUrl;
+        });
+        return Promise.all(promises);
+    };
+
     const handlePost = useCallback(async () => {
-        const numericPrice = parseFloat(price);
-        if (!title.trim() || !image) {
-            Alert.alert('Required', 'Please add a photo and title.');
-            return;
-        }
-        if (isNaN(numericPrice) || numericPrice <= 0) {
-            Alert.alert('Invalid Price', 'Please enter a valid amount.');
+        if (!title.trim() || images.length === 0 || !location.trim()) {
+            Alert.alert('Required', 'Title, Location, and at least 1 Photo are required.');
             return;
         }
 
         setIsLoading(true);
-
         try {
-            const { data: { user } } = await supabase.auth.getUser();
-            if (!user) throw new Error("Session expired.");
+            const { data: { user }, error: authError } = await supabase.auth.getUser();
+            if (authError || !user) throw new Error("Session expired. Please log in again.");
 
-            const publicImageUrl = await uploadToStorage();
+            const publicImageUrls = await uploadAllImages();
 
-            // Insert using exact Database Column Names
             const { error: dbError } = await supabase
                 .from('listings')
                 .insert([{
                     title: title.trim(),
-                    price: numericPrice,
+                    price: parseFloat(price) || 0,
                     description: description.trim(),
-                    image_uri: publicImageUrl, 
+                    image_uris: publicImageUrls, 
+                    image_uri: publicImageUrls[0], 
                     category,
-                    location: 'Milan, IT', // Default location
-                    user_id: user.id,         
+                    location: location.trim(), 
+                    user_id: user.id,          
                 }]);
 
             if (dbError) throw dbError;
 
-            // Clear state and close
-            setTitle(''); setPrice(''); setDescription(''); setImage(null); setBase64Data(null);
+            resetForm();
             onClose();
             Alert.alert("Success", "Listing is live!");
         } catch (error: any) {
-            Alert.alert("Post Failed", error.message);
+            Alert.alert("Post Failed", error.message || "An unknown error occurred.");
         } finally {
             setIsLoading(false);
         }
-    }, [title, price, image, base64Data, category, description, onClose]);
+    }, [title, price, images, base64Array, category, description, location, onClose]);
 
     return (
         <Modal visible={visible} animationType="slide" presentationStyle="pageSheet">
@@ -140,7 +171,7 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
                     <View style={styles.loadingOverlay}>
                         <View style={styles.loadingBox}>
                             <ActivityIndicator size="large" color="#10b981" />
-                            <Text style={styles.loadingText}>Publishing Listing...</Text>
+                            <Text style={styles.loadingText}>Publishing...</Text>
                         </View>
                     </View>
                 )}
@@ -152,8 +183,8 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
                     <Text style={styles.headerTitle}>New Listing</Text>
                     <TouchableOpacity 
                         onPress={handlePost} 
-                        disabled={isLoading || !image} 
-                        style={[styles.postBtn, (isLoading || !image) && {opacity: 0.5}]}
+                        style={[styles.postBtn, (isLoading || images.length === 0) && {opacity: 0.5}]}
+                        disabled={isLoading || images.length === 0}
                     >
                         <Text style={styles.postBtnText}>Post</Text>
                     </TouchableOpacity>
@@ -161,27 +192,56 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
 
                 <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
                     <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
-                        <TouchableOpacity style={styles.imagePlaceholder} onPress={pickImage} disabled={isLoading}>
-                            {image ? <Image source={{ uri: image }} style={styles.previewImage} /> : (
-                                <View style={styles.uploadPrompt}>
-                                    <Ionicons name="camera" size={32} color="#10b981" />
-                                    <Text style={styles.uploadText}>Add Photo (16:9)</Text>
+                        <Text style={styles.label}>Photos ({images.length}/3)</Text>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.galleryScroll}>
+                            {images.map((uri, index) => (
+                                <View key={uri} style={styles.imageContainer}>
+                                    <Image source={{ uri }} style={styles.galleryImage} />
+                                    {uploadingIndexes.includes(index) && (
+                                        <View style={styles.perImageOverlay}>
+                                            <ActivityIndicator color="white" size="small" />
+                                        </View>
+                                    )}
+                                    <TouchableOpacity style={styles.removeBadge} onPress={() => removeImage(index)}>
+                                        <Ionicons name="close" size={18} color="white" />
+                                    </TouchableOpacity>
                                 </View>
+                            ))}
+                            {images.length < 3 && (
+                                <TouchableOpacity style={styles.addMoreBtn} onPress={pickImage}>
+                                    <Ionicons name="camera" size={40} color="#10b981" />
+                                    <Text style={styles.addMoreText}>Add Photo</Text>
+                                </TouchableOpacity>
                             )}
-                        </TouchableOpacity>
+                        </ScrollView>
 
                         <View style={styles.form}>
                             <Text style={styles.label}>Title</Text>
                             <TextInput style={styles.input} placeholder="Item name" value={title} onChangeText={setTitle} />
-                            <Text style={styles.label}>Price (€)</Text>
-                            <TextInput style={styles.input} placeholder="0.00" value={price} onChangeText={setPrice} keyboardType="decimal-pad" />
                             
+                            <View style={{flexDirection: 'row', gap: 10}}>
+                                <View style={{flex: 1}}>
+                                    <Text style={styles.label}>Price (€)</Text>
+                                    <TextInput style={styles.input} placeholder="0.00" value={price} onChangeText={setPrice} keyboardType="numeric" />
+                                </View>
+                                <View style={{flex: 1.5}}>
+                                    <Text style={styles.label}>Location</Text>
+                                    <View style={styles.locationWrapper}>
+                                        <Ionicons name="location-sharp" size={18} color="#10b981" style={{ marginRight: 8 }} />
+                                        <TextInput style={{ flex: 1, height: 50, fontSize: 16 }} placeholder="City, Country" value={location} onChangeText={setLocation} />
+                                    </View>
+                                </View>
+                            </View>
+
                             <Text style={styles.label}>Category</Text>
                             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.catScroll}>
                                 {dbCategories.map((cat) => (
                                     <TouchableOpacity
                                         key={cat.name}
-                                        onPress={() => setCategory(cat.name)}
+                                        onPress={() => {
+                                            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                                            setCategory(cat.name);
+                                        }}
                                         style={[styles.catChip, category === cat.name && styles.catChipActive]}
                                     >
                                         <Text style={[styles.catChipText, category === cat.name && styles.catChipTextActive]}>{cat.name}</Text>
@@ -190,13 +250,7 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
                             </ScrollView>
 
                             <Text style={styles.label}>Description</Text>
-                            <TextInput 
-                                style={[styles.input, styles.textArea]} 
-                                placeholder="Details..." 
-                                value={description} 
-                                onChangeText={setDescription} 
-                                multiline 
-                            />
+                            <TextInput style={[styles.input, styles.textArea]} placeholder="Describe the item..." value={description} onChangeText={setDescription} multiline />
                         </View>
                     </ScrollView>
                 </KeyboardAvoidingView>
@@ -208,24 +262,27 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: 'white' },
     loadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 999, justifyContent: 'center', alignItems: 'center' },
-    loadingBox: { backgroundColor: 'white', padding: 30, borderRadius: 16, alignItems: 'center' },
+    loadingBox: { backgroundColor: 'white', padding: 30, borderRadius: 20, alignItems: 'center' },
     loadingText: { marginTop: 15, fontWeight: '700', color: '#1e293b' },
-    header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
+    header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#f1f5f9', paddingTop: Platform.OS === 'ios' ? 20 : 40 },
     headerTitle: { fontSize: 18, fontWeight: '800' },
     cancelText: { color: '#64748b', fontSize: 16 },
-    postBtn: { backgroundColor: '#10b981', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20 },
+    postBtn: { backgroundColor: '#10b981', paddingHorizontal: 22, paddingVertical: 10, borderRadius: 25 },
     postBtnText: { color: 'white', fontWeight: '800' },
-    scrollContent: { padding: 20 },
-    imagePlaceholder: { width: '100%', aspectRatio: 16 / 9, backgroundColor: '#f8fafc', borderRadius: 12, borderStyle: 'dashed', borderWidth: 2, borderColor: '#cbd5e1', justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
-    previewImage: { width: '100%', height: '100%' },
-    uploadPrompt: { alignItems: 'center' },
-    uploadText: { marginTop: 8, fontWeight: '600', color: '#64748b' },
-    form: { marginTop: 20 },
-    label: { fontSize: 14, fontWeight: '700', color: '#475569', marginBottom: 8 },
-    input: { backgroundColor: '#f8fafc', borderRadius: 12, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: '#e2e8f0' },
+    scrollContent: { padding: 15 },
+    galleryScroll: { marginBottom: 20 },
+    imageContainer: { marginRight: 12, position: 'relative' },
+    galleryImage: { width: width * 0.85, height: (width * 0.85) * (9/16), borderRadius: 16, backgroundColor: '#f1f5f9' },
+    perImageOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
+    removeBadge: { position: 'absolute', top: 12, right: 12, backgroundColor: 'rgba(239, 68, 68, 0.9)', borderRadius: 15, padding: 6 },
+    addMoreBtn: { width: 180, height: (width * 0.85) * (9/16), backgroundColor: '#f8fafc', borderRadius: 16, borderStyle: 'dashed', borderWidth: 2, borderColor: '#cbd5e1', justifyContent: 'center', alignItems: 'center' },
+    addMoreText: { marginTop: 8, fontWeight: '700', color: '#64748b' },
+    label: { fontSize: 14, fontWeight: '700', color: '#475569', marginBottom: 8, marginTop: 10 },
+    input: { backgroundColor: '#f8fafc', borderRadius: 12, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: '#e2e8f0', fontSize: 16 },
+    locationWrapper: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f8fafc', borderRadius: 12, paddingHorizontal: 16, borderWidth: 1, borderColor: '#e2e8f0', marginBottom: 16 },
     textArea: { height: 100, textAlignVertical: 'top' },
-    catScroll: { marginBottom: 20 },
-    catChip: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20, backgroundColor: '#f1f5f9', marginRight: 10, borderWidth: 1, borderColor: '#e2e8f0' },
+    catScroll: { marginBottom: 15 },
+    catChip: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: 20, backgroundColor: '#f1f5f9', marginRight: 10, borderWidth: 1, borderColor: '#e2e8f0' },
     catChipActive: { backgroundColor: '#10b981', borderColor: '#10b981' },
     catChipText: { color: '#64748b', fontWeight: '600' },
     catChipTextActive: { color: 'white' }

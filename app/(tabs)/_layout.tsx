@@ -1,13 +1,47 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
+import { useEffect, useState } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+// Prevent the splash screen from hiding automatically 
+// until we are sure the tabs are ready to render.
+SplashScreen.preventAutoHideAsync();
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
+  const [appIsReady, setAppIsReady] = useState(false);
+
+  useEffect(() => {
+    async function prepare() {
+      try {
+        // You can add any small initial checks here if needed 
+        // (like checking if a user is logged in via Supabase)
+        await new Promise(resolve => setTimeout(resolve, 500)); 
+      } catch (e) {
+        console.warn(e);
+      } finally {
+        // Tell the application to render
+        setAppIsReady(true);
+      }
+    }
+
+    prepare();
+  }, []);
+
+  // When appIsReady is true, we hide the splash screen immediately
+  useEffect(() => {
+    if (appIsReady) {
+      SplashScreen.hideAsync();
+    }
+  }, [appIsReady]);
+
+  if (!appIsReady) {
+    return null;
+  }
 
   return (
     <Tabs
-      // ✅ Matches the file app/(tabs)/home.tsx
       initialRouteName="home" 
       screenOptions={{
         headerShown: false,
@@ -27,7 +61,7 @@ export default function TabLayout() {
       }}
     >
       <Tabs.Screen
-        name="home" // ✅ Must match home.tsx in (tabs)
+        name="home"
         options={{
           title: 'Home',
           tabBarIcon: ({ color, size }) => (
@@ -37,7 +71,7 @@ export default function TabLayout() {
       />
 
       <Tabs.Screen
-        name="explore" // ✅ Must match explore.tsx in (tabs)
+        name="explore"
         options={{
           title: 'Explore',
           tabBarIcon: ({ color, size }) => (
@@ -47,7 +81,7 @@ export default function TabLayout() {
       />
 
       <Tabs.Screen
-        name="wishlist" // ✅ Must match wishlist.tsx in (tabs)
+        name="wishlist"
         options={{
           title: 'Wishlist',
           tabBarIcon: ({ color, size }) => (
@@ -57,7 +91,7 @@ export default function TabLayout() {
       />
 
       <Tabs.Screen
-        name="chat" // ✅ Must match chat.tsx in (tabs)
+        name="chat"
         options={{
           title: 'Chat',
           tabBarIcon: ({ color, size }) => (
@@ -67,7 +101,7 @@ export default function TabLayout() {
       />
 
       <Tabs.Screen
-        name="profile" // ✅ Must match profile.tsx in (tabs)
+        name="profile"
         options={{
           title: 'Profile',
           tabBarIcon: ({ color, size }) => (
