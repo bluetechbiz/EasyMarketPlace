@@ -15,7 +15,11 @@
     },
     "production": {
       "autoIncrement": true,
-      "channel": "production"
+      "channel": "production",
+      "env": {
+        "JAVA_OPTS": "-Xmx4096m",
+        "GRADLE_OPTS": "-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m"
+      }
     }
   },
   "submit": {
