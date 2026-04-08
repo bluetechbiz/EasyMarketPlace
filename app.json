@@ -2,12 +2,12 @@
   "expo": {
     "name": "MyMarketPlace",
     "slug": "market-fresh-start-final",
-    "version": "1.7.0",
+    "version": "1.8.0",
     "scheme": "mymarketplace",
     "orientation": "portrait",
     "icon": "./assets/adaptive_v1.png",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash_v1.png",
       "resizeMode": "contain",
@@ -17,10 +17,10 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.sajer.mymarketplace",
-      "buildNumber": "32"
+      "buildNumber": "37"
     },
     "android": {
-      "versionCode": 36,
+      "versionCode": 37,
       "package": "com.sajer.mymarketplace",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive_v1.png",

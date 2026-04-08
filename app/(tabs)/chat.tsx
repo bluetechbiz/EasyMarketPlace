@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -8,7 +9,7 @@ import {
   Alert,
   Dimensions,
   FlatList,
-  Image,
+  InteractionManager,
   KeyboardAvoidingView,
   Platform,
   StyleSheet,
@@ -69,7 +70,7 @@ const MessageBubble = memo(({ item }: { item: Message }) => {
         isImage && styles.imageBubble,
       ]}>
         {isImage ? (
-          <Image source={{ uri: item.text }} style={styles.chatImage} resizeMode="cover" />
+          <Image source={{ uri: item.text }} style={styles.chatImage} contentFit="cover" transition={200} />
         ) : (
           <Text style={[styles.messageText, { color: item.isMe ? '#fff' : COLORS.textDark }]}>
             {item.text}
@@ -94,7 +95,7 @@ const MessageBubble = memo(({ item }: { item: Message }) => {
 });
 
 export default function ChatScreen() {
-  const params = useLocalSearchParams<ChatScreenParams>();
+  const params = useLocalSearchParams<unknown>() as ChatScreenParams;
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const flatListRef = useRef<FlatList>(null);
@@ -105,6 +106,10 @@ export default function ChatScreen() {
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSendingImage, setIsSendingImage] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+
+  const channelRef = useRef<any>(null);
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchMessages = useCallback(async (convId: string, userId: string) => {
     try {
@@ -121,7 +126,7 @@ export default function ChatScreen() {
           id: m.id,
           text: m.content,
           isMe: m.sender_id === userId,
-          status: 'sent',
+          status: 'sent' as MessageStatus,
           created_at: m.created_at,
           type: getMessageType(m.content),
         })));
@@ -134,123 +139,138 @@ export default function ChatScreen() {
   }, []);
 
   useEffect(() => {
-    const initChat = async () => {
-      // Check if we have the necessary IDs
+    let isMounted = true;
+    const task = InteractionManager.runAfterInteractions(async () => {
       if (!params.itemId || !params.sellerId) {
-        console.log("DEBUG: Missing params, cannot connect");
         setIsLoading(false);
         return;
       }
 
       try {
         const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return router.back();
+        if (!user || !isMounted) return;
+
         setCurrentUserId(user.id);
-        
-        // Find or create conversation
+
         const { data: existing } = await supabase
           .from('conversations')
           .select('id, buyer_id, seller_id')
           .eq('listing_id', params.itemId);
 
-        let conv = existing?.find(
-          c =>
-            (c.buyer_id === user.id && c.seller_id === params.sellerId) ||
-            (c.buyer_id === params.sellerId && c.seller_id === user.id)
-        );
-
-        let convId = conv?.id;
+        let convId = existing?.find(c => 
+          (c.buyer_id === user.id && c.seller_id === params.sellerId) ||
+          (c.buyer_id === params.sellerId && c.seller_id === user.id)
+        )?.id;
 
         if (!convId) {
-          const { data: newConv, error: createError } = await supabase
+          const { data: newConv, error } = await supabase
             .from('conversations')
             .insert({ listing_id: params.itemId, buyer_id: user.id, seller_id: params.sellerId })
-            .select('id').single();
-          if (createError) throw new Error(createError.message);
-          convId = newConv.id;
+            .select('id')
+            .single();
+          if (error) throw error;
+          convId = newConv?.id;
         }
 
-        console.log("DEBUG: Connected to Conversation ID:", convId);
-        setConversationId(convId);
-        await fetchMessages(convId, user.id);
-      } catch (err: any) {
-        Alert.alert("Connection Error", err.message);
-        setIsLoading(false);
+        if (isMounted && convId) {
+          setConversationId(convId);
+          await fetchMessages(convId, user.id);
+        }
+      } catch (err) {
+        console.error(err);
+        if (isMounted) setIsLoading(false);
       }
-    };
-    initChat();
-  }, [params.itemId, params.sellerId]);
+    });
+
+    return () => { isMounted = false; task.cancel?.(); };
+  }, [params.itemId, params.sellerId, fetchMessages]);
 
   useEffect(() => {
     if (!conversationId || !currentUserId) return;
 
-    const channel = supabase
-      .channel(`chat-${conversationId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-          filter: `conversation_id=eq.${conversationId}`,
-        },
-        (payload) => {
-          const newMsg = payload.new;
-          setMessages((prev) => {
-            if (prev.some(m => m.id === newMsg.id)) return prev;
+    // FORCE REMOVAL of conflicting marketplace channel
+    supabase.getChannels().forEach((ch: any) => {
+      if (ch.topic?.includes('marketplace_realtime')) {
+        console.log('🧹 Removing old conflicting channel:', ch.topic);
+        supabase.removeChannel(ch);
+      }
+    });
 
-            const duplicateIndex = prev.findIndex(m => 
-              m.status === 'sending' && m.text === newMsg.content
-            );
+    const channelName = `chat:${conversationId}`;
+    const channel = supabase.channel(channelName);
 
-            if (duplicateIndex !== -1) {
-              const updated = [...prev];
-              updated[duplicateIndex] = {
-                id: newMsg.id,
-                text: newMsg.content,
-                isMe: newMsg.sender_id === currentUserId,
-                status: 'sent',
-                created_at: newMsg.created_at,
-                type: getMessageType(newMsg.content),
-              };
-              return updated;
-            }
+    channel
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `conversation_id=eq.${conversationId}`,
+      }, (payload) => {
+        const newMsg = payload.new as any;
+        setMessages((prev) => {
+          if (prev.some(m => m.id === newMsg.id)) return prev;
 
-            return [{
+          const tempIndex = prev.findIndex(m => m.status === 'sending' && m.text === newMsg.content);
+          if (tempIndex !== -1) {
+            const updated = [...prev];
+            updated[tempIndex] = {
               id: newMsg.id,
               text: newMsg.content,
               isMe: newMsg.sender_id === currentUserId,
               status: 'sent',
               created_at: newMsg.created_at,
               type: getMessageType(newMsg.content),
-            }, ...prev];
-          });
+            };
+            return updated;
+          }
+          return [{ 
+            id: newMsg.id, 
+            text: newMsg.content, 
+            isMe: newMsg.sender_id === currentUserId, 
+            status: 'sent', 
+            created_at: newMsg.created_at, 
+            type: getMessageType(newMsg.content) 
+          }, ...prev];
+        });
+        setTimeout(() => flatListRef.current?.scrollToOffset({ offset: 0, animated: true }), 80);
+      })
+      .on('broadcast', { event: 'typing' }, ({ payload }) => {
+        if (payload.userId !== currentUserId) {
+          setIsTyping(true);
+          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+          typingTimeoutRef.current = setTimeout(() => setIsTyping(false), 2500);
         }
-      )
-      .subscribe((status) => {
-        console.log("DEBUG: Subscription status:", status);
-      });
+      })
+      .subscribe();
+
+    channelRef.current = channel;
 
     return () => {
-      supabase.removeChannel(channel);
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      if (channelRef.current) {
+        channelRef.current.unsubscribe();
+        supabase.removeChannel(channelRef.current);
+        channelRef.current = null;
+      }
     };
   }, [conversationId, currentUserId]);
+
+  const sendTypingIndicator = () => {
+    if (!channelRef.current) return;
+    channelRef.current.send({
+      type: 'broadcast',
+      event: 'typing',
+      payload: { userId: currentUserId },
+    });
+  };
 
   const sendMessage = async (content?: string, isImage = false) => {
     const text = content || inputText.trim();
     if (!text || !conversationId || !currentUserId) return;
-
     if (!isImage) setInputText('');
 
     const tempId = `temp-${Date.now()}`;
-    setMessages(prev => [{
-      id: tempId,
-      text: text,
-      isMe: true,
-      status: 'sending',
-      created_at: new Date().toISOString(),
-      type: isImage ? 'image' : 'text',
-    }, ...prev]);
+    setMessages(prev => [{ id: tempId, text, isMe: true, status: 'sending', created_at: new Date().toISOString(), type: isImage ? 'image' : 'text' }, ...prev]);
 
     const { error } = await supabase.from('messages').insert({
       conversation_id: conversationId,
@@ -264,25 +284,24 @@ export default function ChatScreen() {
   };
 
   const handlePickImage = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.6 });
-    if (!result.canceled && result.assets[0]) {
-      setIsSendingImage(true);
-      try {
-        const manip = await ImageManipulator.manipulateAsync(result.assets[0].uri, [{ resize: { width: 800 } }], { compress: 0.7 });
-        const response = await fetch(manip.uri);
-        const blob = await response.blob();
-        const path = `chat/${currentUserId}_${Date.now()}.jpg`;
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.4 });
+    if (result.canceled || !result.assets[0]) return;
 
-        const { error: uploadError } = await supabase.storage.from('chat-attachments').upload(path, blob);
-        if (uploadError) throw uploadError;
+    setIsSendingImage(true);
+    try {
+      const manip = await ImageManipulator.manipulateAsync(result.assets[0].uri, [{ resize: { width: 800 } }], { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG });
+      const blob = await (await fetch(manip.uri)).blob();
+      const path = `chat/${conversationId}/${currentUserId}_${Date.now()}.jpg`;
 
-        const { data } = supabase.storage.from('chat-attachments').getPublicUrl(path);
-        await sendMessage(data.publicUrl, true);
-      } catch (e: any) {
-        Alert.alert("Upload Failed", e.message);
-      } finally {
-        setIsSendingImage(false);
-      }
+      const { error: uploadError } = await supabase.storage.from('chat-attachments').upload(path, blob);
+      if (uploadError) throw uploadError;
+
+      const { data } = supabase.storage.from('chat-attachments').getPublicUrl(path);
+      await sendMessage(data.publicUrl, true);
+    } catch (e: any) {
+      Alert.alert("Upload Failed", e.message || "Unknown error");
+    } finally {
+      setIsSendingImage(false);
     }
   };
 
@@ -298,7 +317,6 @@ export default function ChatScreen() {
             <Text style={styles.onlineStatus}>Active</Text>
           </View>
         </View>
-
         {params.productImage && (
           <View style={styles.itemHeader}>
             <Image source={{ uri: params.productImage }} style={styles.itemThumb} />
@@ -319,24 +337,34 @@ export default function ChatScreen() {
           inverted
           renderItem={({ item }) => <MessageBubble item={item} />}
           contentContainerStyle={styles.messagesList}
-          keyExtractor={(item) => item.id}
+          keyExtractor={item => item.id}
+          initialNumToRender={20}
         />
       )}
 
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={90}>
+      {isTyping && (
+        <View style={styles.typingContainer}>
+          <Text style={styles.typingText}>{params.sellerName || 'Seller'} is typing...</Text>
+        </View>
+      )}
+
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? insets.bottom + 60 : 0}>
         <View style={[styles.inputContainer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
           <TouchableOpacity onPress={handlePickImage} style={styles.attachBtn} disabled={isSendingImage}>
             {isSendingImage ? <ActivityIndicator size="small" color={COLORS.primary} /> : <Ionicons name="add-circle" size={32} color={COLORS.primary} />}
           </TouchableOpacity>
           <View style={styles.inputWrapper}>
-            <TextInput 
-              style={styles.input} 
-              value={inputText} 
-              onChangeText={setInputText} 
-              placeholder="Message..." 
-              multiline 
+            <TextInput
+              style={styles.input}
+              value={inputText}
+              onChangeText={(text) => {
+                setInputText(text);
+                sendTypingIndicator();
+              }}
+              placeholder="Message..."
+              multiline
             />
-            <TouchableOpacity onPress={() => sendMessage()} style={styles.sendBtn}>
+            <TouchableOpacity onPress={() => sendMessage()} style={styles.sendBtn} disabled={!inputText.trim()}>
               <Ionicons name="arrow-up-circle" size={32} color={inputText.trim() ? COLORS.primary : COLORS.textGray} />
             </TouchableOpacity>
           </View>
@@ -378,5 +406,7 @@ const styles = StyleSheet.create({
   input: { flex: 1, minHeight: 40, maxHeight: 100, fontSize: 16, paddingVertical: 8 },
   sendBtn: { marginLeft: 4, marginBottom: 4 },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  imageStatusOverlay: { position: 'absolute', bottom: 5, right: 8, backgroundColor: 'rgba(0,0,0,0.4)', padding: 2, borderRadius: 4 }
+  imageStatusOverlay: { position: 'absolute', bottom: 5, right: 8, backgroundColor: 'rgba(0,0,0,0.4)', padding: 2, borderRadius: 4 },
+  typingContainer: { paddingHorizontal: 16, paddingVertical: 6, backgroundColor: COLORS.bg },
+  typingText: { fontSize: 13, color: COLORS.textGray, fontStyle: 'italic' },
 });
