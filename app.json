@@ -1,0 +1,66 @@
+{
+  "expo": {
+    "name": "MyMarketPlace",
+    "slug": "market-fresh-start-final",
+    "version": "1.9.0",
+    "scheme": "mymarketplace",
+    "orientation": "portrait",
+    "icon": "./assets/adaptive_v1.png",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash_v1.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#10b981"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.sajer.mymarketplace",
+      "buildNumber": "41"
+    },
+    "android": {
+      "versionCode": 41,
+      "package": "com.sajer.mymarketplace",
+      "googleServicesFile": "./google-services.json",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive_v1.png",
+        "backgroundColor": "#10b981"
+      },
+      "permissions": [
+        "NOTIFICATIONS",
+        "RECEIVE_BOOT_COMPLETED"
+      ]
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "8737336a-0b36-4061-8576-644bad6898b8"
+      }
+    },
+    "owner": "sajero351",
+    "plugins": [
+      "expo-router",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#10b981"
+        }
+      ],
+      [
+        "@stripe/stripe-react-native",
+        {
+          "merchantIdentifier": "merchant.com.sajer.mymarketplace",
+          "enableGooglePay": true
+        }
+      ]
+    ],
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/8737336a-0b36-4061-8576-644bad6898b8"
+    }
+  }
+}
