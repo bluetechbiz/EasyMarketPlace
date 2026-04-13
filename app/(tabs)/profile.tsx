@@ -272,7 +272,7 @@ export default function ProfileScreen() {
                 <Text style={[styles.menuSectionTitle, { color: COLORS.purple }]}>ADMIN TOOLS</Text>
                 <View style={[styles.menuCard, { borderColor: COLORS.purple, borderWidth: 0.5 }]}>
                   <MenuButton icon="cloud-download-outline" color={COLORS.purple} label="AliExpress Importer" onPress={() => router.push('/admin/import')} />
-                  <MenuButton icon="cube-outline" color="#64748b" label="Fulfillment Center" onPress={() => router.push('/admin/orders')} isLast />
+                  <MenuButton icon="cube-outline" color="#64748b" label="Fulfillment Center" onPress={() => router.push('/admin/dashboard')} isLast />
                 </View>
               </View>
             )}

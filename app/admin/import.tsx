@@ -4,6 +4,7 @@ import { useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    FlatList,
     ScrollView,
     StyleSheet,
     Text,
@@ -14,6 +15,7 @@ import {
 import { supabase } from '../../src/lib/supabase';
 
 const PLACEHOLDER_IMAGE = 'https://via.placeholder.com/400x400.png?text=No+Image+Available';
+const DEFAULT_FALLBACK_PRICE = 22.00;
 
 interface ProductData {
     title: string;
@@ -27,157 +29,172 @@ export default function ImportScreen() {
     const [url, setUrl] = useState('');
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
-    
-    const [profitMargin, setProfitMargin] = useState(30); 
+    const [profitMargin, setProfitMargin] = useState(40); 
     const [productData, setProductData] = useState<ProductData | null>(null);
+    
     const scrollViewRef = useRef<ScrollView>(null);
 
-    // ✅ Math Logic
-    const displayPrice = useMemo(() => {
-        if (!productData) return "0.00";
+    // ✅ FIX 1: Default Stats Object (No more null checks needed in UI)
+    const stats = useMemo(() => {
+        const fallback = { displayPrice: "0.00", netProfit: 0, isWinning: false, isLoss: false };
+        if (!productData) return fallback;
+        
+        const rawCost = productData.rawPrice ?? 0;
         const multiplier = 1 + (profitMargin / 100);
-        return (productData.rawPrice * multiplier).toFixed(2);
+        const rawCalculated = rawCost * multiplier;
+        
+        const safeBase = Math.max(rawCalculated, 1);
+        const roundedPrice = Math.ceil(safeBase) - 0.01;
+        
+        const stripeFee = (roundedPrice * 0.029) + 0.30;
+        const netProfit = roundedPrice - rawCost - stripeFee;
+        
+        return {
+            displayPrice: roundedPrice.toFixed(2),
+            netProfit: netProfit,
+            isWinning: netProfit > 6 && profitMargin > 45,
+            isLoss: netProfit <= 0
+        };
     }, [productData, profitMargin]);
 
-    const profitEuro = useMemo(() => {
-        if (!productData) return "0.00";
-        return (parseFloat(displayPrice) - productData.rawPrice).toFixed(2);
-    }, [displayPrice, productData]);
-
-    const isHighMarkup = profitMargin > 80;
-
-    // ✅ UPDATED: Pro-Copywriter Title Optimization
     const optimizeTitle = () => {
         if (!productData) return;
-        
         let cleanTitle = productData.title
-            // 1. Remove generic sales jargon
-            .replace(/aliexpress|official|store|original|new|hot|sale|free shipping|shipping|1pc|pcs|piece|lot/gi, '')
-            // 2. Remove technical clutter (V, W, L, ml, mah)
-            .replace(/\d+V|\d+W|\d+L|\d+ml|\d+mah|220V|110V/gi, '')
-            // 3. Remove years
-            .replace(/\d{4}/g, '') 
-            // 4. Remove symbols and extra spaces
-            .replace(/[|{}()\[\]]/g, '')
+            .replace(/aliexpress|official|store|original|new|hot|sale|free shipping|1pc|pcs|piece|lot/gi, '')
+            .replace(/\d+V|\d+W|\d+mah|220V|110V/gi, '')
+            .replace(/[|{}()[\]]/g, '')
             .replace(/\s\s+/g, ' '); 
 
-        // 5. Convert to Title Case
         cleanTitle = cleanTitle.toLowerCase().split(' ').map(word => 
             word.charAt(0).toUpperCase() + word.slice(1)
         ).join(' ');
 
-        if (cleanTitle.trim().length < 5) {
-            Alert.alert("Optimization skipped", "Title is already clean or too short.");
+        if (!cleanTitle.trim() || cleanTitle.trim().length < 5) {
+            Alert.alert("Invalid Title", "Title is too short. Please edit manually.");
             return;
         }
 
-        setProductData({ ...productData, title: cleanTitle.trim() });
+        setProductData(prev => prev ? { ...prev, title: cleanTitle.trim() } : prev);
     };
 
     const fetchAliExpressData = async () => {
         const cleanUrl = url.trim();
         if (loading || !cleanUrl) return;
 
-        if (!cleanUrl.toLowerCase().includes('aliexpress.com')) {
-            Alert.alert("Invalid URL", "Please paste a valid AliExpress link.");
-            return;
-        }
-
-        const idMatch = cleanUrl.match(/item\/(\d+)\.html/) || cleanUrl.match(/(\d{10,16})/);
-        const itemId = idMatch ? idMatch[1] || idMatch[0] : null;
+        const idMatch = cleanUrl.match(/item\/(\d+)/);
+        const itemId = idMatch ? idMatch[1] : null;
 
         if (!itemId) {
-            Alert.alert("Error", "Could not find a Product ID.");
+            Alert.alert("Invalid URL", "Please use a standard AliExpress link.");
             return;
         }
 
         setLoading(true);
         setProductData(null); 
 
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
         try {
-            const { data, error } = await supabase.functions.invoke('aliexpress-fetch', {
-                body: { itemId }
+            const { data: existing } = await supabase
+                .from('listings')
+                .select('id')
+                .eq('source_url', cleanUrl)
+                .maybeSingle();
+
+            if (existing) {
+                Alert.alert("Duplicate", "Product already in store.");
+                setLoading(false);
+                return;
+            }
+
+            const timeoutPromise = new Promise((_, reject) => {
+                timeoutId = setTimeout(() => reject(new Error("Request timed out.")), 15000);
             });
+
+            const { data, error } = await Promise.race([
+                supabase.functions.invoke('aliexpress-fetch', { body: { itemId } }),
+                timeoutPromise
+            ]) as any;
 
             if (error) throw error;
 
             const item = data?.result?.item || data?.result;
-            if (!item) throw new Error("No item data found.");
+            if (!item) throw new Error("Data retrieval failed.");
 
-            let rawImages: string[] = [];
-            if (Array.isArray(item.images)) {
-                rawImages = item.images;
-            } else if (item.main_image) {
-                rawImages = [item.main_image];
-            }
+            const p = item.price;
+            const rawBase = p?.original_price || p?.market_price || p?.sale_price || p?.value || '';
+            const cleaned = String(rawBase).replace(/[^0-9.]/g, '');
+            const numericPrice = cleaned ? parseFloat(cleaned) : DEFAULT_FALLBACK_PRICE;
+            
+            const finalSupplierCost = numericPrice < 12 ? numericPrice * 1.5 : numericPrice;
 
-            const formattedImages = rawImages.map((img: string) => {
-                if (!img || typeof img !== 'string') return PLACEHOLDER_IMAGE;
-                let cleanImg = img.trim();
-                if (cleanImg.startsWith('//')) return `https:${cleanImg}`;
-                if (cleanImg.startsWith('http')) return cleanImg;
-                return `https://${cleanImg}`;
-            });
-
-            const rawPrice = item.price?.sale_price || item.price?.value || "10.00";
-            const numericPrice = parseFloat(rawPrice.toString().replace(/[^0-9.]/g, ''));
+            let rawImages: string[] = Array.isArray(item.images)
+                ? item.images
+                : item.main_image ? [item.main_image] : [];
+            
+            const formattedImages = rawImages.filter(Boolean).map((img: string) => 
+                img.startsWith('//') ? `https:${img}` : img
+            );
 
             setProductData({
-                title: item.title || item.item_title || "AliExpress Product",
-                rawPrice: isNaN(numericPrice) ? 10.0 : numericPrice,
-                description: item.description || "Imported Dropshipping Item",
-                images: formattedImages.length > 0 ? formattedImages : [PLACEHOLDER_IMAGE],
+                title: (item.title || "AliExpress Item").substring(0, 150),
+                rawPrice: finalSupplierCost,
+                description: (item.description || "No description.").substring(0, 500),
+                images: formattedImages.length > 0 ? formattedImages.slice(0, 8) : [PLACEHOLDER_IMAGE],
                 originalUrl: cleanUrl
             });
 
-            setTimeout(() => scrollViewRef.current?.scrollTo({ y: 350, animated: true }), 200);
+            setProfitMargin(finalSupplierCost < 15 ? 75 : 45);
+            setTimeout(() => scrollViewRef.current?.scrollTo({ y: 300, animated: true }), 400);
 
         } catch (error: any) {
             Alert.alert("Import Failed", error.message);
         } finally {
+            if (timeoutId) clearTimeout(timeoutId);
             setLoading(false);
         }
     };
 
     const saveToSupabase = async () => {
         if (!productData || saving) return;
+
+        if (stats.isLoss) {
+            Alert.alert("Not Profitable", "Increase margin before publishing.");
+            return;
+        }
+
         setSaving(true);
         try {
             const { data: { user } } = await supabase.auth.getUser();
-            if (!user) throw new Error("Please log in first.");
+            if (!user) throw new Error("Please log in.");
 
-            const { data: existing } = await supabase
-                .from('listings')
-                .select('id')
-                .eq('source_url', productData.originalUrl)
-                .maybeSingle();
-
-            if (existing) {
-                Alert.alert("Already Imported", "This product is already in your store.");
-                return;
+            // ✅ FIX 2: Safe URL Object Handling
+            let finalAffiliateUrl = productData.originalUrl;
+            try {
+                const urlObj = new URL(finalAffiliateUrl);
+                urlObj.searchParams.set("trackingId", "ErnestApp01");
+                finalAffiliateUrl = urlObj.toString();
+            } catch (e) {
+                // If URL constructor fails, manual append as fallback
+                finalAffiliateUrl += (finalAffiliateUrl.includes('?') ? '&' : '?') + 'trackingId=ErnestApp01';
             }
-
-            const primaryImage = productData.images?.[0] || PLACEHOLDER_IMAGE;
-            const galleryImages = productData.images?.slice(0, 3) || [];
 
             const { error } = await supabase.from('listings').insert([{
                 title: productData.title.trim(),
-                price: parseFloat(displayPrice),
+                price: parseFloat(stats.displayPrice),
                 description: productData.description,
-                image_uri: primaryImage,
-                image_uris: galleryImages,
+                image_uri: productData.images[0],
+                image_uris: productData.images, 
                 user_id: user.id, 
-                is_dropshipping: true,
-                source_url: productData.originalUrl,
+                source_url: finalAffiliateUrl,
                 category: 'Dropshipping'
             }]);
 
             if (error) throw error;
             
-            Alert.alert("Success!", "Product is now live.");
+            Alert.alert("Success!", "Product published.");
             setProductData(null);
             setUrl('');
-            scrollViewRef.current?.scrollTo({ y: 0, animated: true });
         } catch (error: any) {
             Alert.alert("Save Error", error.message);
         } finally {
@@ -186,7 +203,7 @@ export default function ImportScreen() {
     };
 
     return (
-        <ScrollView ref={scrollViewRef} style={styles.container} contentContainerStyle={{ paddingBottom: 60 }}>
+        <ScrollView ref={scrollViewRef} style={styles.container} contentContainerStyle={{ paddingBottom: 100 }}>
             <Text style={styles.header}>Pro Importer</Text>
             
             <View style={styles.inputArea}>
@@ -209,65 +226,72 @@ export default function ImportScreen() {
 
             {productData && (
                 <View style={styles.card}>
-                    <Image 
-                        source={{ uri: productData.images?.[0] || PLACEHOLDER_IMAGE }} 
-                        style={styles.image} 
-                        contentFit="cover"
-                        transition={500}
+                    {stats.isWinning && (
+                        <View style={styles.badge}><Text style={styles.badgeText}>🔥 HIGH POTENTIAL</Text></View>
+                    )}
+
+                    {/* ✅ FIX 3: FlatList for better image virtualization performance */}
+                    <FlatList 
+                        data={productData.images}
+                        keyExtractor={(_, index) => index.toString()}
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        renderItem={({ item }) => (
+                            <Image source={{ uri: item }} style={styles.galleryImg} contentFit="cover" />
+                        )}
+                        style={styles.gallery}
                     />
                     
                     <View style={styles.rowBetween}>
                         <Text style={styles.label}>Product Title</Text>
                         <TouchableOpacity onPress={optimizeTitle}>
-                            <Text style={styles.aiText}>✨ AI Optimize</Text>
+                            <Text style={styles.aiText}>✨ AI Clean</Text>
                         </TouchableOpacity>
                     </View>
                     <TextInput 
                         style={styles.titleInput} 
                         value={productData.title} 
-                        onChangeText={(t) => setProductData({...productData, title: t})}
+                        onChangeText={(t) => setProductData(prev => prev ? {...prev, title: t} : prev)}
                         multiline
                     />
 
                     <View style={styles.profitSection}>
                         <View style={styles.rowBetween}>
-                            <Text style={styles.label}>Profit Margin</Text>
-                            <Text style={[styles.markupText, isHighMarkup && { color: '#ef4444' }]}>
-                                {profitMargin}% {isHighMarkup ? '⚠️' : ''}
-                            </Text>
+                            <Text style={styles.label}>Margin: {profitMargin}%</Text>
+                            <Text style={styles.feeNote}>Incl. Stripe Fees</Text>
                         </View>
                         
                         <Slider
                             style={{ width: '100%', height: 40 }}
-                            minimumValue={5}
-                            maximumValue={100} 
+                            minimumValue={10}
+                            maximumValue={120}
                             step={5}
                             value={profitMargin}
-                            onValueChange={setProfitMargin}
-                            minimumTrackTintColor={isHighMarkup ? "#ef4444" : "#6366f1"}
-                            maximumTrackTintColor="#334155"
-                            thumbTintColor={isHighMarkup ? "#ef4444" : "#818cf8"}
+                            onSlidingComplete={setProfitMargin}
+                            minimumTrackTintColor="#6366f1"
                         />
 
                         <View style={styles.revenueGrid}>
                             <View style={styles.statBox}>
-                                <Text style={styles.statLabel}>SUPPLIER COST</Text>
+                                <Text style={styles.statLabel}>COST</Text>
                                 <Text style={styles.statValue}>€{productData.rawPrice.toFixed(2)}</Text>
                             </View>
                             <View style={styles.statBox}>
-                                <Text style={styles.statLabel}>YOUR PROFIT</Text>
-                                <Text style={[styles.statValue, { color: '#22c55e' }]}>+€{profitEuro}</Text>
+                                <Text style={styles.statLabel}>NET PROFIT</Text>
+                                <Text style={[styles.statValue, { color: stats.isLoss ? '#ef4444' : '#22c55e' }]}>
+                                    €{stats.netProfit.toFixed(2)}
+                                </Text>
                             </View>
                         </View>
                     </View>
 
                     <View style={styles.priceFooter}>
                         <View>
-                            <Text style={styles.label}>Final Store Price</Text>
-                            <Text style={styles.finalPrice}>€{displayPrice}</Text>
+                            <Text style={styles.label}>Store Price</Text>
+                            <Text style={styles.finalPrice}>€{stats.displayPrice}</Text>
                         </View>
                         <TouchableOpacity 
-                            style={[styles.saveBtn, saving && styles.btnDisabled]} 
+                            style={[styles.saveBtn, (saving || stats.isLoss) && styles.btnDisabled]} 
                             onPress={saveToSupabase} 
                             disabled={saving}
                         >
@@ -282,26 +306,29 @@ export default function ImportScreen() {
 
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: '#0f172a' },
-    header: { fontSize: 32, fontWeight: '900', color: 'white', textAlign: 'center', marginTop: 60, marginBottom: 20 },
-    inputArea: { backgroundColor: '#1e293b', margin: 15, padding: 20, borderRadius: 24, borderWidth: 1, borderColor: '#334155', elevation: 5 },
-    input: { backgroundColor: '#0f172a', color: 'white', padding: 15, borderRadius: 12, marginBottom: 15 },
-    fetchBtn: { backgroundColor: '#6366f1', padding: 18, borderRadius: 12, alignItems: 'center' },
+    header: { fontSize: 28, fontWeight: '900', color: 'white', textAlign: 'center', marginTop: 50, marginBottom: 10 },
+    inputArea: { backgroundColor: '#1e293b', margin: 15, padding: 15, borderRadius: 20 },
+    input: { backgroundColor: '#0f172a', color: 'white', padding: 12, borderRadius: 10, marginBottom: 10 },
+    fetchBtn: { backgroundColor: '#6366f1', padding: 15, borderRadius: 10, alignItems: 'center' },
     btnDisabled: { opacity: 0.5 },
-    btnText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
-    card: { margin: 15, backgroundColor: '#1e293b', padding: 20, borderRadius: 24, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 10 },
-    image: { width: '100%', height: 280, borderRadius: 15, marginBottom: 15, backgroundColor: '#0f172a' },
-    label: { color: '#94a3b8', fontSize: 11, marginBottom: 5, fontWeight: 'bold', textTransform: 'uppercase' },
+    btnText: { color: 'white', fontWeight: 'bold' },
+    card: { margin: 15, backgroundColor: '#1e293b', padding: 15, borderRadius: 20 },
+    gallery: { marginBottom: 15 },
+    galleryImg: { width: 100, height: 100, borderRadius: 10, marginRight: 8 },
+    badge: { backgroundColor: '#f59e0b', alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, marginBottom: 10 },
+    badgeText: { color: 'black', fontSize: 10, fontWeight: 'bold' },
+    label: { color: '#94a3b8', fontSize: 10, fontWeight: 'bold' },
+    feeNote: { color: '#64748b', fontSize: 9 },
     rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-    aiText: { color: '#818cf8', fontWeight: 'bold', fontSize: 12 },
-    titleInput: { color: 'white', fontSize: 16, borderBottomWidth: 1, borderBottomColor: '#334155', paddingBottom: 10, marginBottom: 20 },
-    profitSection: { backgroundColor: '#0f172a', padding: 15, borderRadius: 16, marginBottom: 20, borderWidth: 1, borderColor: '#334155' },
-    markupText: { color: '#818cf8', fontSize: 20, fontWeight: '900' },
-    revenueGrid: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#1e293b' },
+    aiText: { color: '#818cf8', fontWeight: 'bold', fontSize: 11 },
+    titleInput: { color: 'white', fontSize: 15, borderBottomWidth: 1, borderBottomColor: '#334155', paddingBottom: 5, marginBottom: 15 },
+    profitSection: { backgroundColor: '#0f172a', padding: 12, borderRadius: 12, marginBottom: 15 },
+    revenueGrid: { flexDirection: 'row', marginTop: 10 },
     statBox: { flex: 1 },
-    statLabel: { color: '#64748b', fontSize: 9, fontWeight: 'bold' },
-    statValue: { color: 'white', fontSize: 16, fontWeight: 'bold' },
-    priceFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 15, borderTopWidth: 1, borderTopColor: '#334155' },
-    finalPrice: { color: '#22c55e', fontSize: 30, fontWeight: '900' },
-    saveBtn: { backgroundColor: '#22c55e', paddingHorizontal: 25, paddingVertical: 15, borderRadius: 15 },
-    saveBtnText: { color: 'white', fontWeight: '900', fontSize: 16 }
+    statLabel: { color: '#64748b', fontSize: 8, fontWeight: 'bold' },
+    statValue: { color: 'white', fontSize: 14, fontWeight: 'bold' },
+    priceFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    finalPrice: { color: '#22c55e', fontSize: 24, fontWeight: '900' },
+    saveBtn: { backgroundColor: '#22c55e', paddingHorizontal: 20, paddingVertical: 12, borderRadius: 12 },
+    saveBtnText: { color: 'white', fontWeight: 'bold' }
 });

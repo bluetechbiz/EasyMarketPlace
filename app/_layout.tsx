@@ -1,54 +1,107 @@
+import { StripeProvider } from '@stripe/stripe-react-native';
+import * as Notifications from 'expo-notifications';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect, useState } from 'react';
-import { Text, View } from 'react-native';
-// ✅ Import the Provider too
-import { AppProvider, useAppContext } from '../src/context/AppContext';
+import { ActivityIndicator, Platform, Text, View } from 'react-native';
 
-// Force native splash to hide
-SplashScreen.hideAsync().catch(() => {});
+import { AppProvider, useAppContext } from '../src/context/AppContext';
+import { supabase } from '../src/lib/supabase';
+import { CartService } from '../src/services/cartService';
+import { useCartStore } from '../src/store/cartStore';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 function RootLayoutContent() {
   const context = useAppContext();
-  const [showSplash, setShowSplash] = useState(true);
-
-  const loading = context ? context.loading : false;
+  const loading = context?.loading ?? false;
+  const setCartItems = useCartStore((s) => s.setItems);
+  const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setShowSplash(false);
-    }, 2500);
-    return () => clearTimeout(timer);
+    const setup = async () => {
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('default', {
+          name: 'default',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#f97316',
+        });
+      }
+    };
+    setup();
+  }, []);
+
+  useEffect(() => {
+    const loadCart = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      try {
+        const cart = await CartService.fetchCart(user.id);
+        setCartItems(cart);
+        console.log("🛒 GLOBAL CART LOADED:", cart.length);
+      } catch (err) {
+        console.log("❌ Cart init error:", err);
+      }
+    };
+    loadCart();
   }, []);
 
   useEffect(() => {
     if (!loading) {
-      setShowSplash(false);
+      const timer = setTimeout(async () => {
+        setIsReady(true);
+        await SplashScreen.hideAsync();
+      }, 800);
+      return () => clearTimeout(timer);
     }
   }, [loading]);
 
-  if (showSplash) {
+  if (!isReady) {
     return (
-      <View style={{ flex: 1, backgroundColor: '#10b981', justifyContent: 'center', alignItems: 'center' }}>
-        <Text style={{ color: 'white', fontSize: 22 }}>Loading... 🚀</Text>
+      <View style={{ flex: 1, backgroundColor: '#f97316', justifyContent: 'center', alignItems: 'center' }}>
+        <Text style={{ color: 'white', fontSize: 24, fontWeight: '900' }}>ELITE MARKET 🚀</Text>
+        <ActivityIndicator size="large" color="white" />
       </View>
     );
   }
 
   return (
     <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="(tabs)" />
-      <Stack.Screen name="(auth)" />
+      {/* 1. This points to your (tabs) folder */}
+      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+      
+      {/* 2. Authentication */}
+      <Stack.Screen name="(auth)" options={{ headerShown: false }} />
+
+      {/* 3. Order Success (Matches file in app/ folder) */}
+      <Stack.Screen
+        name="order-success"
+        options={{ presentation: 'modal', headerShown: false }}
+      />
+
       <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
     </Stack>
   );
 }
 
-// 🏆 THIS IS THE CRITICAL WRAPPER PART
 export default function RootLayout() {
   return (
-    <AppProvider>
-      <RootLayoutContent />
-    </AppProvider>
+    <StripeProvider
+      publishableKey="pk_test_51TIQilBuQf8jr31CEIkL0ubsa5rNzr3IvgPaEqM4XBSwl9ZwiYd07vOgiIMQZb654DVt5MqHnpbDD4cIgBUHbjcM00qFZuaK3y"
+      merchantIdentifier="merchant.com.sajer.mymarketplace"
+    >
+      <AppProvider>
+        <RootLayoutContent />
+      </AppProvider>
+    </StripeProvider>
   );
 }

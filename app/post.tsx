@@ -65,7 +65,6 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
     };
 
     const pickImage = async () => {
-        // Note: Check if you want to increase this limit to 10 in the UI as well
         if (images.length >= 3) {
             Alert.alert("Limit Reached", "Max 3 photos allowed.");
             return;
@@ -108,7 +107,6 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
             setUploadingIndexes(prev => [...prev, index]);
             const fileName = `listing_${Date.now()}_${index}.jpg`;
             
-            // ✅ Updated to lowercase 'listing-images'
             const { error } = await supabase.storage
                 .from('listing-images')
                 .upload(fileName, decode(base64), { contentType: 'image/jpeg', upsert: true });
@@ -118,7 +116,6 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
                 throw error;
             }
 
-            // ✅ Updated to lowercase 'listing-images'
             const { data: urlData } = supabase.storage.from('listing-images').getPublicUrl(fileName);
             setUploadingIndexes(prev => prev.filter(i => i !== index));
             return urlData.publicUrl;
@@ -134,11 +131,14 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
 
         setIsLoading(true);
         try {
+            // 1. Identify the Goods Owner
             const { data: { user }, error: authError } = await supabase.auth.getUser();
             if (authError || !user) throw new Error("Session expired. Please log in again.");
 
+            // 2. Upload images to storage
             const publicImageUrls = await uploadAllImages();
 
+            // 3. Insert into database with SELLER_ID link
             const { error: dbError } = await supabase
                 .from('listings')
                 .insert([{
@@ -149,14 +149,15 @@ export default function PostModal({ visible, onClose }: PostModalProps) {
                     image_uri: publicImageUrls[0], 
                     category,
                     location: location.trim(), 
-                    user_id: user.id,          
+                    // ✅ Updated from user_id to seller_id to match your Marketplace SQL
+                    seller_id: user.id,          
                 }]);
 
             if (dbError) throw dbError;
 
             resetForm();
             onClose();
-            Alert.alert("Success", "Listing is live!");
+            Alert.alert("Success 🎉", "Listing is live! Buyers can now see your goods.");
         } catch (error: any) {
             Alert.alert("Post Failed", error.message || "An unknown error occurred.");
         } finally {

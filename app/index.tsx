@@ -1,48 +1,121 @@
-// app/index.tsx
+import * as Notifications from 'expo-notifications';
 import { Redirect } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Platform, Text, View } from 'react-native';
 import { useAppContext } from '../src/context/AppContext';
+import { registerForPushNotificationsAsync } from '../src/lib/notifications';
+
+// Keep splash screen visible
+SplashScreen.preventAutoHideAsync().catch(() => {});
+
+// Notification handler
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 export default function Index() {
   const { currentUser, isLoading } = useAppContext();
+
+  const [isReady, setIsReady] = useState(false);
   const [isTimedOut, setIsTimedOut] = useState(false);
 
-  // 1. Safety Timeout: Don't let the user stare at a spinner forever
+  const notificationListener = useRef<any>(null);
+  const responseListener = useRef<any>(null);
+
+  // -----------------------------
+  // NOTIFICATION SETUP
+  // -----------------------------
+  useEffect(() => {
+    if (Platform.OS === 'android') {
+      Notifications.setNotificationChannelAsync('default', {
+        name: 'default',
+        importance: Notifications.AndroidImportance.MAX,
+      });
+    }
+
+    notificationListener.current =
+      Notifications.addNotificationReceivedListener(() => {});
+
+    responseListener.current =
+      Notifications.addNotificationResponseReceivedListener(() => {});
+
+    return () => {
+      notificationListener.current?.remove();
+      responseListener.current?.remove();
+    };
+  }, []);
+
+  // -----------------------------
+  // SAFETY TIMEOUT (AUTH FIX)
+  // -----------------------------
   useEffect(() => {
     const timer = setTimeout(() => {
       if (isLoading) {
-        console.warn("Auth check timed out. Redirecting to login as fallback.");
+        console.warn('Auth timeout triggered');
         setIsTimedOut(true);
       }
-    }, 8000); // 8 seconds is the "sweet spot" for mobile patience
+    }, 5000);
 
     return () => clearTimeout(timer);
   }, [isLoading]);
 
-  // 2. Hide Splash Screen when loading is done OR timeout hits
+  // -----------------------------
+  // APP INITIALIZATION
+  // -----------------------------
   useEffect(() => {
-    if (!isLoading || isTimedOut) {
-      SplashScreen.hideAsync().catch(() => {});
-    }
-  }, [isLoading, isTimedOut]);
+    const prepare = async () => {
+      if (!isLoading || isTimedOut) {
+        try {
+          if (currentUser?.id) {
+            await registerForPushNotificationsAsync(currentUser.id);
+          }
+        } catch (e) {
+          console.warn('Push registration failed', e);
+        } finally {
+          await SplashScreen.hideAsync().catch(() => {});
+          setIsReady(true);
+        }
+      }
+    };
 
-  // 3. While strictly loading (and not timed out), show the brand-colored spinner
-  if (isLoading && !isTimedOut) {
+    prepare();
+  }, [isLoading, isTimedOut, currentUser?.id]);
+
+  // -----------------------------
+  // LOADING SCREEN
+  // -----------------------------
+  if (!isReady && !isTimedOut) {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#ffffff' }}>
-        <ActivityIndicator size="large" color="#10b981" />
+      <View
+        style={{
+          flex: 1,
+          justifyContent: 'center',
+          alignItems: 'center',
+          backgroundColor: '#fff',
+        }}
+      >
+        <ActivityIndicator size="large" color="#f97316" />
+        <Text style={{ marginTop: 10, fontWeight: '600', color: '#666' }}>
+          Loading Marketplace...
+        </Text>
       </View>
     );
   }
 
-  // 4. THE REDIRECT LOGIC (with your 'replace' and 'timeout' suggestions)
-  // If no user found OR if the session check hung for too long, send to Login
+  // -----------------------------
+  // REDIRECT IF NOT LOGGED IN
+  // -----------------------------
   if (!currentUser || isTimedOut) {
-    return <Redirect href="/(auth)/login" replace />;
+    return <Redirect href="/(auth)/login" />;
   }
 
-  // 5. Success: User is authenticated, send to Home
-  return <Redirect href="/(tabs)/home" replace />;
+  // -----------------------------
+  // MAIN APP ENTRY
+  // -----------------------------
+  return <Redirect href="/(tabs)/home" />;
 }

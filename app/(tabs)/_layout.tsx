@@ -4,8 +4,6 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useEffect, useState } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-// Prevent the splash screen from hiding automatically 
-// until we are sure the tabs are ready to render.
 SplashScreen.preventAutoHideAsync();
 
 export default function TabLayout() {
@@ -15,41 +13,34 @@ export default function TabLayout() {
   useEffect(() => {
     async function prepare() {
       try {
-        // You can add any small initial checks here if needed 
-        // (like checking if a user is logged in via Supabase)
-        await new Promise(resolve => setTimeout(resolve, 500)); 
+        await new Promise(resolve => setTimeout(resolve, 500));
       } catch (e) {
         console.warn(e);
       } finally {
-        // Tell the application to render
         setAppIsReady(true);
       }
     }
-
     prepare();
   }, []);
 
-  // When appIsReady is true, we hide the splash screen immediately
   useEffect(() => {
     if (appIsReady) {
       SplashScreen.hideAsync();
     }
   }, [appIsReady]);
 
-  if (!appIsReady) {
-    return null;
-  }
+  if (!appIsReady) return null;
 
   return (
     <Tabs
-      initialRouteName="home" 
+      initialRouteName="home"
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: '#22c55e',
+        tabBarActiveTintColor: '#f97316',
         tabBarInactiveTintColor: '#94a3b8',
         tabBarStyle: {
           backgroundColor: '#fff',
-          height: 60 + insets.bottom, 
+          height: 60 + insets.bottom,
           paddingBottom: insets.bottom,
           borderTopWidth: 1,
           borderTopColor: '#f1f5f9',
@@ -80,22 +71,23 @@ export default function TabLayout() {
         }}
       />
 
+      {/* CART (ONLY IF FILE EXISTS INSIDE (tabs)) */}
+      <Tabs.Screen
+        name="cartreview"
+        options={{
+          title: 'Cart',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="cart-outline" size={size} color={color} />
+          ),
+        }}
+      />
+
       <Tabs.Screen
         name="wishlist"
         options={{
           title: 'Wishlist',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="heart-outline" size={size} color={color} />
-          ),
-        }}
-      />
-
-      <Tabs.Screen
-        name="chat"
-        options={{
-          title: 'Chat',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="chatbubbles-outline" size={size} color={color} />
           ),
         }}
       />
